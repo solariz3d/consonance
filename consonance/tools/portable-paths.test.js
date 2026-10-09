@@ -501,7 +501,7 @@ test('a declared resource missing from disk is SKIPPED and NAMED, never silently
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test('the green line says how many baselined sites are FATAL — exempted is not fixed', () => {
+test('the green line says how many baselined sites are FATAL — exempted is not fixed', { skip: "WORKSHOP-BOUND: reads the committed path baseline, which is this machine's register and does not ship (EXCLUDE)" }, () => {
   // The census failure, in this file's own output: a FATAL in the exemption list used to be
   // invisible on a green run, which reads exactly like having no FATAL at all.
   //
@@ -519,7 +519,7 @@ test('the green line says how many baselined sites are FATAL — exempted is not
   assert.match(r.out, /shipped prose from \d+ bundle\.resources/);
 });
 
-test('the real repo is green against its committed baseline', () => {
+test('the real repo is green against its committed baseline', { skip: "WORKSHOP-BOUND: reads the committed path baseline, which is this machine's register and does not ship (EXCLUDE)" }, () => {
   // Not a tautology: --update was run once and its output reviewed. From here on this asserts
   // that nothing has landed since.
   const r = runGuard(path.resolve(__dirname, '..', '..'),
