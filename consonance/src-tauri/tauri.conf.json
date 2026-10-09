@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Consonance",
+  "version": "0.1.0",
+  "identifier": "com.consonance.app",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Consonance",
+        "width": 840,
+        "height": 600,
+        "minWidth": 700,
+        "minHeight": 500,
+        "resizable": true,
+        "center": true,
+        "backgroundColor": "#0B0E14"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "brief/BOOT.md": "BOOT.md",
+      "brief/SEED.md": "SEED.md",
+      "brief/BASE_JOURNAL.md": "BASE_JOURNAL.md",
+      "brief/COMMITTEE.md": "COMMITTEE.md",
+      "brief/BUILDING.md": "BUILDING.md",
+      "brief/LIBRARIAN.md": "LIBRARIAN.md",
+        "brief/THIRD_PLACE.md": "THIRD_PLACE.md",
+      "brief/room-settings.json": "room-settings.json",
+      "../README.md": "README.md",
+      "../GUIDE.md": "GUIDE.md",
+      "../../exo_memory/cards/*.md": "cards/",
+      "../../exo_memory/spread/*.md": "spread/",
+      "../../exo_memory/research/*.md": "research/",
+      "../../exo_memory/record/*.md": "record/",
+      "../../exo_memory/SOURCE.md": "SOURCE.md"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp"
+      }
+    }
+  }
+}

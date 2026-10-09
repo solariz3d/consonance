@@ -1,0 +1,535 @@
+// close.test.js — run with: node close.test.js
+//
+// WHAT THIS FILE IS ACTUALLY GUARDING. The command it tests is the last thing that runs before the
+// lid shuts, and the failure it exists to prevent is not a crash — it is THE WORD "CLOSED" PRINTED
+// OVER A STATE THAT NEVER LEFT. So the tests that matter here are the refusals: a failed push must
+// not read as a close; an unverified remote must stop the publish with nothing sent; a capture
+// mid-rewrite must defer rather than travel torn. If those go green for the wrong reason this file
+// is decoration and the command is the 04:33 sentence with a cron behind it.
+//
+// EVERY TEST RUNS AGAINST A FIXTURE — its own data dir, its own manifest, its own bare "remote"
+// and clone. Nothing here reads C:\Consonance\data or C:\Consonance\state, and this file must pass
+// identically on a machine that has neither.
+//
+// THE ONE STUB, NAMED RATHER THAN BURIED. `privacy` is injected in the module-level tests, because
+// a fixture has no GitHub repo and no `gh` login and the real check correctly refuses a local-path
+// remote. It is a parameter of runClose with a real default, not a flag and not an environment
+// variable: there is no way to turn the gate off from a command line. The last test in this file
+// runs the CLI with no injection at all and requires it to refuse, which is the wiring the stub
+// cannot vouch for.
+
+const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync, spawn } = require('child_process');
+
+// THE ONE SEAM, AND IT BELONGS TO THE MUTATION HARNESS (P-HARNESS, pane A, 2026-09-15). `close.mutants.js`
+// writes each mutant into a COPY beside the real file and points this suite at it through CLOSE_UNDER_TEST,
+// so no run, killed or not, ever writes the tracked close.js (a kill on this machine runs no handler, L059 §1).
+// Measured load paths of close.js in this suite: `require(TOOL)` below and the spawned `node TOOL` CLI; both go
+// through TOOL, so the copy is what both run. The copy must sit in THIS directory, because close.js resolves
+// `./state-sync.js` and spawns `<dirname>/state-sync.js`. Refused loudly otherwise; unset, nothing changes.
+const TOOL = (() => {
+  const u = process.env.CLOSE_UNDER_TEST;
+  if (!u) return path.join(__dirname, 'close.js');
+  const p = path.resolve(u);
+  if (path.dirname(p) !== __dirname || !fs.existsSync(p)) {
+    throw new Error(`CLOSE_UNDER_TEST must name an existing file in ${__dirname}; got ${u}`);
+  }
+  return p;
+})();
+const C = require(TOOL);
+const M = require(path.join(__dirname, 'state-sync.js'));
+
+process.env.CONSONANCE_MACHINE = process.env.CONSONANCE_MACHINE || 'TESTL';
+
+let pass = 0, fail = 0;
+function test(name, fn) {
+  try { fn(); console.log(`  ok   ${name}`); pass++; }
+  catch (e) { console.log(`  FAIL ${name}\n       ${e && e.message}`); fail++; }
+}
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'close-'));
+let seq = 0;
+
+const MIN_MANIFEST = {
+  version: 99,
+  rules: [
+    { glob: 'board.jsonl', class: 'TRAVELS', why: 'the record' },
+    { glob: 'captures/*.txt', class: 'TRAVELS', why: 'the warm-resume carriers' },
+    { glob: 'captures', class: 'TRAVELS', why: 'holds them' },
+    { glob: 'state-sync.status.json', class: 'STAYS', why: 'per-machine as-of view' },
+    { glob: 'state-sync.push.json', class: 'STAYS', why: 'the receipt of this machine\'s last push' },
+  ],
+  forbidden: [{ glob: 'install_id*', why: 'both machines would share an identity' }],
+};
+
+/** A whole world: data dir, manifest, a bare "remote", and a clone of it. */
+function world(files) {
+  const dir = path.join(tmp, 'case' + (++seq));
+  const data = path.join(dir, 'data');
+  fs.mkdirSync(data, { recursive: true });
+  for (const [rel, body] of Object.entries(files || {})) {
+    const p = path.join(data, rel.split('/').join(path.sep));
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, body);
+  }
+  const manPath = path.join(dir, 'manifest.json');
+  fs.writeFileSync(manPath, JSON.stringify(MIN_MANIFEST, null, 2));
+  const bare = path.join(dir, 'remote.git');
+  execFileSync('git', ['init', '--bare', '-q', '-b', 'main', bare]);
+  const state = path.join(dir, 'state');
+  execFileSync('git', ['clone', '-q', bare, state], { stdio: ['ignore', 'pipe', 'pipe'] });
+  for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) execFileSync('git', ['-C', state, 'config', k, v]);
+  return { dir, data, state, bare, manPath };
+}
+
+const PRIVATE = () => ({ state: 'private', why: 'gh: visibility=PRIVATE', repo: 'test/fixture' });
+const UNKNOWN = () => ({ state: 'unknown', why: 'gh repo view failed: gh: command not found', repo: 'test/fixture' });
+const PUBLIC = () => ({ state: 'PUBLIC', why: 'gh: visibility=PUBLIC', repo: 'test/fixture' });
+
+/** Run the close against a fixture, capturing every line it printed. */
+function close(w, opts) {
+  const lines = [];
+  const r = C.runClose({
+    data: w.data,
+    state: w.state,
+    privacy: (opts && opts.privacy) || PRIVATE,
+    checkOnly: !!(opts && opts.checkOnly),
+    retryWaitMs: opts && opts.retryWaitMs,
+    env: { CONSONANCE_DATA: w.data, CONSONANCE_STATE: w.state, STATE_MANIFEST: w.manPath, CONSONANCE_MACHINE: 'TESTL' },
+    out: (s) => lines.push(s),
+    err: (s) => lines.push(s),
+  });
+  return { ...r, text: lines.join('\n') };
+}
+
+/** `git log --oneline`, or '' when the repo has no commits — which exits 1, not 0. */
+function log(repo) {
+  try { return execFileSync('git', ['-C', repo, 'log', '--oneline'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
+  catch (_) { return ''; }
+}
+const head = (repo) => { try { return execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); } catch (_) { return null; } };
+const remoteMain = (bare) => { try { return execFileSync('git', ['-C', bare, 'rev-parse', 'refs/heads/main'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch (_) { return null; } };
+
+/** Prepare and commit the state set locally without publishing it — the pre-state of a stalled close. */
+function committedNotPushed(w) {
+  execFileSync(process.execPath, [path.join(__dirname, 'state-sync.js'), '--push', '--no-remote'], {
+    env: { ...process.env, CONSONANCE_DATA: w.data, CONSONANCE_STATE: w.state, STATE_MANIFEST: w.manPath, CONSONANCE_MACHINE: 'TESTL' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+// ═══ THE REFUSALS — written first and run first, because they are the deliverable ═════════════
+
+// ── L065: A STATE DIR THAT RESOLVES TO NOTHING IS A NAMED REFUSAL, NEVER A TypeError ───────────────────────────────
+// E's L062 R-C1 §4 step 3. `runClose` took `o.state || sync.stateDir()` and went straight to
+// `path.join(STATE, '.git')`: a null there throws `TypeError: The "path" argument must be of type string`, and a
+// stateDir() that throws escapes runClose altogether. Today stateDir() still ends in a literal fallback
+// (state-sync.js:141), so neither can happen on a stock tree — they become reachable when that fallback goes (E's step
+// 4). These pin the behaviour for that day. The stub is IN-PROCESS on the one module close.js holds, and it is
+// restored in `finally`: no test here may reach the real stateDir(), which would hand back C:\Consonance\state.
+const SYNC = require(path.join(__dirname, 'state-sync.js'));
+function withStateDir(fake, fn) {
+  const real = SYNC.stateDir;
+  SYNC.stateDir = fake;
+  try { return fn(); } finally { SYNC.stateDir = real; }
+}
+function closeNoState(stateDirFake) {
+  const w = world({ 'board.jsonl': '{"x":1}\n' });
+  const lines = [];
+  let threw = null, r = null;
+  withStateDir(stateDirFake, () => {
+    try {
+      r = C.runClose({ data: w.data, privacy: PRIVATE, checkOnly: true, out: (s) => lines.push(s), err: (s) => lines.push(s) });
+    } catch (e) { threw = e; }
+  });
+  return { r, threw, text: lines.join('\n'), w };
+}
+
+test('L065: a state dir that resolves to NOTHING is a named refusal, not a TypeError', () => {
+  const { r, threw, text } = closeNoState(() => null);
+  assert.strictEqual(threw, null, `runClose must not throw: ${threw && threw.constructor.name + ': ' + threw.message}`);
+  assert.strictEqual(r.closed, false, 'nothing was closed');
+  assert.strictEqual(r.code, 2, 'the configuration refusal code, like the missing-corpus one');
+  assert.ok(/NOT CLOSED — no state repo declared/.test(text), `the refusal must say what is missing:\n${text}`);
+});
+
+test('L065: a stateDir() that THROWS is the same named refusal, and it carries the thrown reason', () => {
+  const { r, threw, text } = closeNoState(() => { throw new Error('PROBE-REASON'); });
+  assert.strictEqual(threw, null, `the throw must not escape runClose: ${threw && threw.message}`);
+  assert.strictEqual(r.code, 2);
+  assert.ok(/no state repo declared/.test(text), text);
+  assert.ok(/PROBE-REASON/.test(text), `the reason is reported, never swallowed:\n${text}`);
+});
+
+// The fix it names must be one that FIXES THIS TOOL. close.js resolves through state-sync.js stateDir(), which reads
+// CONSONANCE_STATE (state-sync.js:133) — since L069 the ONE name every state tool reads. CONSONANCE_STATE_REPO is
+// retired (read by nothing), so a refusal naming it would print a recovery that does nothing.
+test('L065: the refusal names what close.js actually reads — state_dir and CONSONANCE_STATE, not _REPO', () => {
+  const { text } = closeNoState(() => null);
+  assert.ok(/state_dir/.test(text) && /\.consonance\.json/.test(text), `must name the config key:\n${text}`);
+  assert.ok(/\bCONSONANCE_STATE\b/.test(text), `must name the variable close.js reads:\n${text}`);
+  assert.ok(!/CONSONANCE_STATE_REPO/.test(text), `CONSONANCE_STATE_REPO is live-follow's name and does not reach close.js:\n${text}`);
+});
+
+// state-sync.js:139 returns `cfg.state_dir` untrimmed, so `"state_dir": "  "` in ~/.consonance.json reaches here as a
+// blank string. Taken as a path it refuses with "not a git repository:   " — true and useless. It is an undeclared
+// state dir and must be named as one. (Added after mutant #6, "a blank stateDir() is taken as a path", survived.)
+test('L065: a BLANK state dir is the same named refusal, not a blank path', () => {
+  const { r, text } = closeNoState(() => '   ');
+  assert.strictEqual(r.code, 2);
+  assert.ok(/no state repo declared/.test(text), `a blank declaration is no declaration:\n${text}`);
+});
+
+test('L065: the state refusal fires before anything is prepared — no commit lands in the state tree', () => {
+  const { w } = closeNoState(() => null);
+  assert.strictEqual(log(w.state), '', 'the state clone must be untouched');
+});
+
+// The packet's own red condition, kept as a CONTROL: an empty home and no CONSONANCE_* vars refuses on the missing
+// corpus BEFORE the state is ever consulted. It was a clean refusal before this lap and must stay one.
+test('L065 control: an empty home with no CONSONANCE_* vars refuses on the corpus, with no stack trace', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'close-home-'));
+  const env = { ...process.env, USERPROFILE: home, HOME: home };
+  for (const k of Object.keys(env)) if (/^CONSONANCE_/.test(k)) delete env[k];
+  let code = 0, err = '';
+  try { execFileSync(process.execPath, [TOOL, '--check'], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); }
+  catch (e) { code = e.status; err = String(e.stderr || ''); }
+  assert.strictEqual(code, 2, `must exit 2, got ${code}:\n${err}`);
+  assert.ok(/no corpus declared/.test(err), err);
+  assert.ok(!/TypeError|\n\s+at /.test(err), `no stack may reach the user:\n${err}`);
+});
+
+test('A PUSH THAT FAILS IS NOT A CLOSE: it says NOT CLOSED and quotes git', () => {
+  // The push address is disarmed exactly the way the chair disarmed the real one at 04:43
+  // (`git remote set-url --push origin no_push`), so the remote stays READABLE and only the push
+  // fails. That separates this case from "the remote could not be read", which has its own line.
+  const w = world({ 'board.jsonl': 'row\n' });
+  execFileSync('git', ['-C', w.state, 'remote', 'set-url', '--push', 'origin', 'no_push']);
+  const r = close(w);
+  assert.strictEqual(r.closed, false, r.text);
+  assert.strictEqual(r.code, 1);
+  assert.ok(/NOT CLOSED — the push failed/.test(r.text), r.text);
+  assert.ok(/no_push/.test(r.text), 'git\'s own words must reach the keeper: ' + r.text);
+  assert.ok(!/^CLOSED/m.test(r.text), 'nothing may print the word CLOSED here');
+  assert.strictEqual(remoteMain(w.bare), null, 'the remote must still have nothing');
+});
+
+test('an UNVERIFIED remote stops the close before anything is published', () => {
+  const w = world({ 'board.jsonl': 'row\n' });
+  const r = close(w, { privacy: UNKNOWN });
+  assert.strictEqual(r.closed, false, r.text);
+  assert.ok(/not confirmed private/.test(r.text), r.text);
+  assert.ok(/gh: command not found/.test(r.text), 'the reading itself must be quoted');
+  assert.strictEqual(remoteMain(w.bare), null, 'nothing may reach the remote');
+  assert.ok(log(w.state) !== '', 'the set is still committed locally and safe');
+});
+
+test('a PUBLIC remote is refused as hard as an unknown one', () => {
+  const w = world({ 'board.jsonl': 'row\n' });
+  const r = close(w, { privacy: PUBLIC });
+  assert.strictEqual(r.closed, false, r.text);
+  assert.ok(/reads PUBLIC/.test(r.text), r.text);
+  assert.strictEqual(remoteMain(w.bare), null);
+});
+
+test('a remote that cannot be READ is not treated as a remote that is up to date', () => {
+  const w = world({ 'board.jsonl': 'row\n' });
+  execFileSync('git', ['-C', w.state, 'remote', 'set-url', 'origin', path.join(w.dir, 'no-such-remote.git')]);
+  const r = close(w);
+  assert.strictEqual(r.closed, false, r.text);
+  assert.ok(/the remote could not be read/.test(r.text), r.text);
+});
+
+test('A TORN TAIL DEFERS AND IS NEVER PUBLISHED: a path that will not settle refuses the close by name', () => {
+  // A future mtime can never be SETTLE_MS old, so the quiescence gate can never certify it: the
+  // deterministic stand-in for a pane that is writing without pause.
+  const w = world({ 'board.jsonl': 'row\n', 'captures/A.txt': 'tail' });
+  const soon = new Date(Date.now() + 3600 * 1000);
+  fs.utimesSync(path.join(w.data, 'captures', 'A.txt'), soon, soon);
+  const r = close(w, { retryWaitMs: 10 });
+  assert.strictEqual(r.closed, false, r.text);
+  assert.ok(/DEFERRED/.test(r.text), 'it must SAY deferred: ' + r.text);
+  assert.ok(/captures\/A\.txt/.test(r.text), 'and name the path');
+  assert.ok(/would not settle/.test(r.text), r.text);
+  assert.strictEqual(log(w.state), '', 'a deferred set leaves no commit');
+  assert.strictEqual(remoteMain(w.bare), null, 'and nothing at the remote');
+});
+
+test('THE DEFERRED RETRY IS REAL: a path that settles during the wait closes on the second pass', () => {
+  // Deterministic rather than timed-and-hoped-for: the mtime is 2.5 s in the FUTURE, so the first
+  // pass refuses it outright (FUTURE_MTIME) and the second, after a 3.5 s wait, finds a file whose
+  // mtime is ~1 s in the past and settles. A loaded machine makes the margin BIGGER, not smaller —
+  // the wait is a floor. (An assertion whose answer depends on how busy the machine is is not an
+  // assertion; that lesson cost this seat a flaky test earlier tonight.)
+  const w = world({ 'board.jsonl': 'row\n', 'captures/A.txt': 'tail' });
+  const soon = new Date(Date.now() + 2500);
+  fs.utimesSync(path.join(w.data, 'captures', 'A.txt'), soon, soon);
+  const r = close(w, { retryWaitMs: 3500 });
+  assert.ok(/DEFERRED/.test(r.text), 'the first pass must have deferred: ' + r.text);
+  assert.ok(/retrying once/.test(r.text), 'and said it was retrying: ' + r.text);
+  assert.strictEqual(r.closed, true, r.text);
+  assert.ok(/after one deferred retry/.test(r.text), r.text);
+  assert.strictEqual(remoteMain(w.bare), head(w.state), 'the retry must actually have published');
+});
+
+// ═══ THE CLOSE ITSELF ═════════════════════════════════════════════════════════════════════════
+
+test('a remote that is AHEAD refuses the close and points at the pull — Sunday\'s case', () => {
+  // The laptop closing on Sunday after the desktop has been working all week: the remote has
+  // commits this machine has never seen, git rejects the push as non-fast-forward, and the close
+  // must refuse rather than report a round trip that did not happen.
+  const w = world({ 'board.jsonl': 'row\n' });
+  const other = path.join(w.dir, 'desktop');
+  execFileSync('git', ['clone', '-q', w.bare, other], { stdio: ['ignore', 'pipe', 'pipe'] });
+  for (const [k, v] of [['user.email', 'd@d'], ['user.name', 'd']]) execFileSync('git', ['-C', other, 'config', k, v]);
+  fs.writeFileSync(path.join(other, 'from-the-desktop.txt'), 'a week of work\n');
+  execFileSync('git', ['-C', other, 'add', '--', 'from-the-desktop.txt']);
+  execFileSync('git', ['-C', other, 'commit', '-q', '-m', 'desktop', '--', 'from-the-desktop.txt']);
+  execFileSync('git', ['-C', other, 'push', '-q', 'origin', 'main:main']);
+  const theirs = remoteMain(w.bare);
+
+  const r = close(w);
+  assert.strictEqual(r.closed, false, r.text);
+  assert.ok(/the push failed/.test(r.text), r.text);
+  assert.ok(/--pull/.test(r.text), 'it must point at the pull: ' + r.text);
+  assert.strictEqual(remoteMain(w.bare), theirs, 'the other machine\'s work must be untouched');
+});
+
+test('A PUSH THAT SUCCEEDS WHILE THE REMOTE DOES NOT MOVE IS NOT A CLOSE', () => {
+  // Not a contrivance: a remote whose PUSH url and FETCH url point at different repositories is
+  // one `git remote set-url --push` away, and it is the exact command that was run on the real
+  // state tree at 04:43 tonight. git exits 0, the bytes land somewhere, and the place the room
+  // reads from never changed. Only asking the remote afterwards catches it.
+  const w = world({ 'board.jsonl': 'row\n' });
+  const elsewhere = path.join(w.dir, 'elsewhere.git');
+  execFileSync('git', ['init', '--bare', '-q', '-b', 'main', elsewhere]);
+  execFileSync('git', ['-C', w.state, 'remote', 'set-url', '--push', 'origin', elsewhere]);
+  const r = close(w);
+  assert.strictEqual(r.closed, false, r.text);
+  assert.ok(/the remote did not move/.test(r.text), r.text);
+  assert.ok(/Believe the remote/.test(r.text));
+  assert.strictEqual(remoteMain(w.bare), null, 'the remote the room reads from still has nothing');
+  assert.ok(remoteMain(elsewhere), 'and the bytes went somewhere else entirely');
+});
+
+test('a close publishes the set and PROVES it by asking the remote', () => {
+  const w = world({ 'board.jsonl': 'row\n', 'captures/A.txt': 'tail' });
+  const r = close(w);
+  assert.strictEqual(r.closed, true, r.text);
+  assert.strictEqual(r.code, 0);
+  assert.ok(/remote confirms/.test(r.text), r.text);
+  assert.ok(/asked the remote, not the push/.test(r.text));
+  assert.strictEqual(remoteMain(w.bare), head(w.state), 'the remote must hold this machine\'s HEAD');
+  assert.ok(fs.existsSync(path.join(w.state, 'data', 'board.jsonl')), 'the state set travelled');
+});
+
+test('the in-sync line names this machine and its commit', () => {
+  const w = world({ 'board.jsonl': 'row\n' });
+  const r = close(w);
+  assert.ok(/in sync: TESTL [0-9a-f]{7}/.test(r.text), r.text);
+});
+
+test('A QUIET CLOSE IS A CLOSE: nothing changed and the remote already holds it', () => {
+  const w = world({ 'board.jsonl': 'row\n' });
+  close(w);
+  const r = close(w);
+  assert.strictEqual(r.closed, true, r.text);
+  assert.ok(/nothing to publish/.test(r.text), r.text);
+  assert.ok(/nothing changed/.test(r.text), 'and it must say state-sync found nothing to commit');
+});
+
+test('BUT A QUIET PUSH IS NOT: nothing-changed over a remote that is BEHIND still publishes', () => {
+  // This is the case state-sync's own --push exits 0 on: `same` short-circuits before the remote is
+  // ever consulted, so a commit that failed to publish yesterday stays unpublished forever and the
+  // tool reports success. A close that read that exit code would swallow it.
+  const w = world({ 'board.jsonl': 'row\n' });
+  committedNotPushed(w);
+  assert.strictEqual(remoteMain(w.bare), null, 'precondition: the remote has nothing');
+  const r = close(w);
+  assert.ok(/nothing changed/.test(r.text), 'state-sync must have found nothing new to commit: ' + r.text);
+  assert.strictEqual(r.closed, true, r.text);
+  assert.strictEqual(remoteMain(w.bare), head(w.state), 'and the close published it anyway');
+});
+
+test('and when THAT push cannot land, the quiet close is refused rather than reported', () => {
+  const w = world({ 'board.jsonl': 'row\n' });
+  committedNotPushed(w);
+  execFileSync('git', ['-C', w.state, 'remote', 'set-url', '--push', 'origin', 'no_push']);
+  const r = close(w);
+  assert.strictEqual(r.closed, false, r.text);
+  assert.ok(/the push failed/.test(r.text), r.text);
+  assert.strictEqual(remoteMain(w.bare), null);
+});
+
+test('--check runs every gate and publishes nothing', () => {
+  const w = world({ 'board.jsonl': 'row\n' });
+  const r = close(w, { checkOnly: true });
+  assert.strictEqual(r.closed, true, r.text);
+  assert.ok(/CHECK ONLY/.test(r.text), r.text);
+  assert.ok(/NOTHING WAS PUBLISHED/.test(r.text));
+  assert.ok(/privacy verified here/.test(r.text), 'the gate still ran');
+  assert.strictEqual(log(w.state), '', '--check must not commit');
+  assert.strictEqual(remoteMain(w.bare), null, 'and must not publish');
+});
+
+test('--check over a remote that is BEHIND says what it would publish and publishes nothing', () => {
+  // The case the first --check test cannot reach: a tree that HAS a commit the remote does not.
+  // Without this, the whole publish branch is unguarded in check mode — found by the mutant pass,
+  // which is the entire reason that file exists.
+  const w = world({ 'board.jsonl': 'row\n' });
+  committedNotPushed(w);
+  const r = close(w, { checkOnly: true });
+  assert.strictEqual(r.closed, true, r.text);
+  assert.ok(/would publish: main [0-9a-f]{7} -> origin/.test(r.text), r.text);
+  assert.ok(/CHECK ONLY/.test(r.text));
+  assert.strictEqual(remoteMain(w.bare), null, 'a rehearsal must not publish');
+});
+
+test('--check refuses on an unverified remote too, so a rehearsal cannot pass a gate the close would fail', () => {
+  const w = world({ 'board.jsonl': 'row\n' });
+  const r = close(w, { checkOnly: true, privacy: UNKNOWN });
+  assert.strictEqual(r.closed, false, r.text);
+  assert.ok(/not confirmed private/.test(r.text), r.text);
+});
+
+// ═══ THE RECEIPT — a reading is not a state ═══════════════════════════════════════════════════
+
+test('a receipt from another pid is treated as ABSENT, not as an answer', () => {
+  const w = world({});
+  fs.writeFileSync(path.join(w.data, M.RECEIPT_NAME),
+    JSON.stringify({ run_id: '999-1', pid: 999, at: new Date().toISOString(), outcome: 'PUSHED' }));
+  const r = C.readReceipt(w.data, 12345, Date.now() - 1000);
+  assert.strictEqual(r.rec, null);
+  assert.ok(/pid 999/.test(r.why), r.why);
+});
+
+test('a receipt stamped BEFORE this run began is treated as absent — the 04:33 defect, one level down', () => {
+  const w = world({});
+  fs.writeFileSync(path.join(w.data, M.RECEIPT_NAME),
+    JSON.stringify({ run_id: '12345-1', pid: 12345, at: new Date(Date.now() - 3600 * 1000).toISOString(), outcome: 'PUSHED' }));
+  const r = C.readReceipt(w.data, 12345, Date.now() - 1000);
+  assert.strictEqual(r.rec, null);
+  assert.ok(/before this run began/.test(r.why), r.why);
+});
+
+test('a receipt from this run is accepted', () => {
+  const w = world({});
+  fs.writeFileSync(path.join(w.data, M.RECEIPT_NAME),
+    JSON.stringify({ run_id: '12345-1', pid: 12345, at: new Date().toISOString(), outcome: 'LOCAL_ONLY' }));
+  const r = C.readReceipt(w.data, 12345, Date.now() - 1000);
+  assert.ok(r.rec, r.why);
+  assert.strictEqual(r.rec.outcome, 'LOCAL_ONLY');
+});
+
+test('no receipt at all is a refusal, and the tool\'s own words are shown rather than parsed', () => {
+  const w = world({});
+  const r = C.readReceipt(w.data, 12345, Date.now() - 1000);
+  assert.strictEqual(r.rec, null);
+  assert.ok(/no state-sync\.push\.json/.test(r.why), r.why);
+});
+
+test('an outcome that is not a prepared set refuses the close', () => {
+  // REFUSED_UNPLACED: a real state-sync refusal that is NOT the retryable one.
+  const w = world({ 'board.jsonl': 'row\n', 'a-path-nobody-ruled.json': '{}' });
+  const r = close(w);
+  assert.strictEqual(r.closed, false, r.text);
+  assert.ok(/REFUSED_UNPLACED/.test(r.text), r.text);
+  assert.ok(/a-path-nobody-ruled\.json/.test(r.text), 'and names the path');
+  assert.strictEqual(remoteMain(w.bare), null);
+});
+
+// ═══ THE WIRING — no injection at all ═════════════════════════════════════════════════════════
+
+test('THE CLI USES THE REAL PRIVACY CHECK: run with no injection, it refuses a non-github remote', () => {
+  const w = world({ 'board.jsonl': 'row\n' });
+  let out = '', code = 0;
+  try {
+    out = execFileSync(process.execPath, [TOOL], {
+      encoding: 'utf8',
+      env: { ...process.env, CONSONANCE_DATA: w.data, CONSONANCE_STATE: w.state, STATE_MANIFEST: w.manPath, CONSONANCE_MACHINE: 'TESTL' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) { code = e.status; out = String(e.stdout || '') + String(e.stderr || ''); }
+  assert.strictEqual(code, 1, out);
+  assert.ok(/NOT CLOSED/.test(out), out);
+  assert.ok(/not confirmed private/.test(out), out);
+  assert.ok(/not a github remote/.test(out), 'the real check\'s own reading, not a stub\'s: ' + out);
+  assert.strictEqual(remoteMain(w.bare), null);
+});
+
+test('the default privacy check in the source is state-sync\'s, not a local copy', () => {
+  const src = fs.readFileSync(TOOL, 'utf8');
+  assert.ok(/o\.privacy \|\| sync\.remotePrivacy/.test(src), 'the default must BE the real check');
+  assert.ok(!/CONSONANCE_(GH|PRIVACY)|--no-privacy|--force/.test(src),
+    'there must be no flag and no environment variable that turns the gate off');
+});
+
+test('close.js does not touch the record repository', () => {
+  const src = fs.readFileSync(TOOL, 'utf8');
+  const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.ok(!/lighthouse/.test(code), 'no path into the record repo in executable code');
+  assert.ok(!/\bREPO\b/.test(code), 'and no record-repo root resolved at all');
+});
+
+// ── D133: close.js:319-321 printed "in sync:" over ANY pair of heads — the false green D132 found in the pulse ──────
+// After a close, this machine is at the head and the other may not be. The line must say which is behind.
+test('D133: every machine at the head reads "in sync:", in the old words', () => {
+  assert.strictEqual(C.syncLine([{ machine: 'D', commit: '1a2b3c4' }, { machine: 'L', commit: '1a2b3c4' }], '1a2b3c4'), 'in sync: D 1a2b3c4 · L 1a2b3c4');
+});
+
+test('D133: a machine whose last push is not the head reads NOT in sync, and is named as behind', () => {
+  const l = C.syncLine([{ machine: 'D', commit: '1a2b3c4' }, { machine: 'L', commit: '9486b30' }], '1a2b3c4');
+  assert.ok(/^NOT in sync: /.test(l), l);
+  assert.ok(/L behind — last pushed 9486b30/.test(l), l);
+  assert.ok(/D 1a2b3c4 \(head\)/.test(l), l);
+});
+
+test('D133: a machine that never pushed, beside a head, reads "never pushed"', () => {
+  const l = C.syncLine([{ machine: 'D', commit: null }, { machine: 'L', commit: '9486b30' }], '9486b30');
+  assert.ok(/NOT in sync: D never pushed/.test(l), l);
+});
+
+test('D133: no machine has pushed — the old words', () => {
+  assert.strictEqual(C.syncLine([], null), 'in sync: no machine has pushed yet');
+});
+
+test('D133: with no known head the line is the old list (it cannot say who is behind)', () => {
+  assert.strictEqual(C.syncLine([{ machine: 'D', commit: 'f70d50a' }, { machine: 'L', commit: '9486b30' }], null), 'in sync: D f70d50a · L 9486b30');
+});
+
+test('D133: a REAL close after another machine published earlier prints that machine as behind, never "in sync"', () => {
+  // Mutant C5 (finish() printing the old line) survived the syncLine unit tests: this runs the whole close.
+  const w = world({ 'board.jsonl': 'row\n' });
+  fs.mkdirSync(path.join(w.state, 'machines'), { recursive: true });
+  fs.writeFileSync(path.join(w.state, 'machines', 'OTHER.json'), JSON.stringify({ machine: 'OTHER', at: '2026-09-10T07:39:42.374Z' }) + '\n');
+  execFileSync('git', ['-C', w.state, 'add', '-A']);
+  execFileSync('git', ['-C', w.state, 'commit', '-q', '-m', 'state: OTHER']);
+  execFileSync('git', ['-C', w.state, 'push', '-q', 'origin', 'main'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = close(w);
+  assert.strictEqual(r.closed, true, r.text);
+  assert.ok(/NOT in sync: OTHER behind — last pushed [0-9a-f]{7} · TESTL [0-9a-f]{7} \(head\)/.test(r.text), r.text);
+  assert.ok(!/^\s*in sync:/m.test(r.text), r.text);
+});
+
+console.log('');
+// D134 (librarian, from E's leave.js hand-back §2): a divergence refusal must reach the reader with each file and count —
+// state-sync's REFUSED_DIVERGED receipt puts them under `files` and sets no `why`, and the old lines dropped them.
+test('a REFUSED_DIVERGED receipt names each diverged file and its row count, not only "state-sync exited 1"', () => {
+  const lines = C.notPreparedLines({ outcome: 'REFUSED_DIVERGED', rc: 1,
+    files: [{ path: 'board.jsonl', state_only_lines: 3 }, { path: 'lap.jsonl', state_only_lines: 1 }] });
+  assert.ok(lines.includes('    board.jsonl  3 row(s) only in the state copy'), lines.join('\n'));
+  assert.ok(lines.includes('    lap.jsonl  1 row(s) only in the state copy'), lines.join('\n'));
+  assert.strictEqual(lines[lines.length - 1], 'Nothing was published.');
+});
+
+test('a numeric `files` (a prepared set\'s count) is never read as a list of diverged files', () => {
+  const lines = C.notPreparedLines({ outcome: 'REFUSED_UNPLACED', rc: 1, files: 64, paths: ['x.json'] });
+  assert.deepStrictEqual(lines, ['state-sync exited 1', '    x.json', 'Nothing was published.']);
+});
+
+console.log(`close.test.js: ${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);
+

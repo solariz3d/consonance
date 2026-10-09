@@ -1,0 +1,539 @@
+#!/usr/bin/env node
+'use strict';
+// OPEN ITEMS — what is still owed, COMPUTED rather than remembered.
+//
+// WHY THIS FILE EXISTS, with the number that caused it. On 2026-08-18 four panes measured what one
+// compaction destroys, against a falsifier fixed before a row was read: file and instrument names
+// survive at 33.8%, commit shas at 10.2%, structured numbers at 9.3%, and REGISTERED PREDICTIONS
+// AND FALSIFIERS AT 3.5%. The summarizer keeps story and loses verification, and the class this room
+// runs on is the class it keeps least. Lost material does not heal in later conversation either —
+// about 9% recovery for shas.
+//
+// The consequence is not "summarize better". It is that A COMMITMENT HELD ONLY AS PROSE HAS ROUGHLY
+// A 1-IN-30 CHANCE OF SURVIVING THE NEXT GAP, and a forgotten falsifier is indistinguishable from
+// one that was never registered. Maintenance law 1 already said recall from the master; what the
+// measurement adds is that THE TRANSCRIPT IS NOT A MASTER. Prose in a conversation is a copy by
+// construction.
+//
+// So this does not store the open items as text. Each is a QUESTION WITH A COMMAND, and the answer
+// is recomputed on every run. Nothing here can go stale, because nothing here is a claim about the
+// world — it is a reading of it. A handoff paragraph saying "the rebuild is pending" is wrong the
+// moment somebody rebuilds; this prints CLOSED and says why.
+//
+//   node consonance/tools/open-items.js          human output
+//   node consonance/tools/open-items.js --json   one object per item
+//
+// Exit 0 always. A sensor, not a gate — same law as sourced-stop.js and for the same reason: a
+// check that can block is a check somebody disables.
+//
+// TO ADD AN ITEM: give it a check() returning {state, detail}. If you cannot write a command that
+// answers it, IT DOES NOT GO HERE — put it in the journal as prose and accept the 3.5%. That
+// refusal is the point: the value of this file is that everything in it is decidable.
+//
+// AND EVERY CHECK PRINTS ITS UNIVERSE — {universe: {seen, skipped, rule}} — because a verdict
+// computed over a surface nobody stated is a verdict about an unknown thing. P-UNIVERSE,
+// registered 2026-08-25: an instrument computes health over the surface it CAN see and reports it
+// as health of the surface it is NAMED for. The failure lives in the DENOMINATOR, not the check.
+//
+// This file had two of them. `seed-carrier` compared five briefs with `if (!a || !b) continue`,
+// so a brief that vanished from the repo or the build was dropped in silence and the CLOSED line
+// counted only what survived — an absent file and a matching one produced the same green. Both
+// ledger readers parse JSON per line and `.filter(Boolean)` the failures away, so a corrupted row
+// reduces the denominator instead of being reported. Neither was a wrong check. Both were right
+// checks over a surface that had quietly shrunk.
+//
+// THE ITEMS LIST IS ITSELF SUCH A SURFACE, and it is the one that cannot be fixed by printing —
+// only by admitting. "2 of 5 still open" is a reading of the commitments SOMEBODY WROTE A CHECK
+// FOR. A commitment nobody wrote a check for is not CLOSED here; it is ABSENT, and absent reads
+// exactly like done. The footer says so on every run rather than leaving the reader to infer it.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { execSync } = require('child_process');
+
+const REPO = path.resolve(__dirname, '..', '..');
+const HOME = os.homedir();
+
+function sh(cmd) {
+  try {
+    return execSync(cmd, { cwd: REPO, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  } catch (e) { return null; }
+}
+function md5(p) {
+  try { return crypto.createHash('md5').update(fs.readFileSync(p)).digest('hex').slice(0, 8); }
+  catch (e) { return null; }
+}
+
+/* Where a release build actually lands. cargo honours CARGO_TARGET_DIR and .cargo/config.toml,
+ * so the conventional path under src-tauri/ can be empty while a complete build exists
+ * elsewhere. This item reported "no built copy — never built on this machine" for weeks because
+ * it looked in exactly one place, while a full release build sat in C:\build\lighthouse-target.
+ * An absence you did not search for is not a finding. */
+function candidateDirs() {
+  const out = [];
+  if (process.env.CARGO_TARGET_DIR) out.push(path.join(process.env.CARGO_TARGET_DIR, "release"));
+  for (const cfg of [path.join(REPO, "consonance/src-tauri/.cargo/config.toml"),
+                     path.join(REPO, ".cargo/config.toml")]) {
+    try {
+      const m = fs.readFileSync(cfg, "utf8").match(/target-dir\s*=\s*"([^"]+)"/);
+      if (m) out.push(path.join(m[1], "release"));
+    } catch (_) {}
+  }
+  out.push(path.join(REPO, "consonance/src-tauri/target/release"));
+  out.push(path.join(REPO, "target/release"));
+  return out;
+}
+
+/* ONE ledger reader, counting what it could NOT parse instead of filtering it away.
+ *
+ * Both vantage items did `.map(JSON.parse-or-null).filter(Boolean)`, which turns a corrupted row
+ * into a smaller denominator. That is the P-UNIVERSE shape exactly: the check was right and the
+ * surface had quietly shrunk. A row that will not parse is a row whose outcome is UNKNOWN, and an
+ * unknown must be counted, never dropped — residue.js was fixed for the same defect on 2026-08-17
+ * (its count-what-you-cannot-parse safeguard was invisible in every output mode because it was an
+ * expando on an Array, so it is worth putting the number in the RETURN VALUE, not on the array). */
+function readLedger(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); }
+  catch (e) { return { rows: [], lines: 0, unparseable: 0, missing: true }; }
+  const lines = text.trim() ? text.trim().split(/\r?\n/).filter(Boolean) : [];
+  const rows = [];
+  let unparseable = 0;
+  for (const l of lines) {
+    try { rows.push(JSON.parse(l)); }
+    catch (e) { unparseable++; }
+  }
+  return { rows, lines: lines.length, unparseable, missing: false };
+}
+
+/* THE AUTHORITY FOR WHAT SHIPS IS tauri.conf.json, NOT THIS FILE.
+ *
+ * This item used to carry `const names = ['SEED','BOOT','BASE_JOURNAL','COMMITTEE','LIBRARIAN']`
+ * and print "5 seen · 0 skipped". Six briefs are bundled. BUILDING.md was missing from the list,
+ * was DRIFTED against the built copy, and is the file carrying the two-turn dispatch rule — so a
+ * fresh room read the pre-correction copy while this instrument reported the brief surface checked.
+ *
+ * Found by pane E, 2026-08-25, attacking the retrofit that was written to end exactly this class:
+ * "0 skipped is arithmetically correct and epistemically worthless." The skip counter ranges over
+ * the instrument's OWN list, so an entry missing from that list is not skipped — it is absent, and
+ * absence has no counter. A universe print computed from a hardcoded list can only report skips
+ * against the list, which makes the wrong denominator look audited.
+ *
+ * So the denominator is enumerated from outside: bundle.resources in tauri.conf.json is what the
+ * installer actually ships, globs and all. THERE IS DELIBERATELY NO FALLBACK LIST. If the
+ * authority cannot be read this item goes UNKNOWN, because a fallback is how the hardcoded list
+ * survives, and this defect's whole mechanism was a list nobody re-derived. */
+// Escapes every non-word character rather than a hand-listed class: the list is the thing that
+// gets one entry short, which is the defect this whole file is answering.
+function escapeRx(t) { return t.replace(/[^A-Za-z0-9_-]/g, function (c) { return '\\' + c; }); }
+
+function bundleResources() {
+  /* OPEN_ITEMS_TAURI_CONF exists so the authority can be SWAPPED in a test, which is the only
+   * way to show this check actually reads it rather than reciting a number that happens to match.
+   * Same seam as FERRY_LEDGER, VANTAGE_DATA, CARRIER_DRIFT_ROOT and JS_SUITE_ROOT, for the same
+   * stated reason: an instrument that cannot be pointed at a known corpus cannot be shown to work. */
+  const conf = process.env.OPEN_ITEMS_TAURI_CONF || path.join(REPO, 'consonance/src-tauri/tauri.conf.json');
+  let j;
+  try { j = JSON.parse(fs.readFileSync(conf, 'utf8')); }
+  catch (e) { return { error: 'cannot read ' + conf + ' — ' + e.message, entries: [], declared: 0 }; }
+  const res = j && j.bundle && j.bundle.resources;
+  if (!res || typeof res !== 'object') {
+    return { error: 'no bundle.resources in ' + conf, entries: [], declared: 0 };
+  }
+  // Resource paths are relative to the tauri directory, which is where the config lives.
+  // Relative to the CONFIG's own directory, so a swapped authority resolves against itself.
+  const base = path.dirname(conf);
+  const entries = [];
+  for (const from of Object.keys(res)) {
+    const to = res[from];
+    if (from.indexOf('*') === -1) {
+      entries.push({ from: from, to: to, src: path.resolve(base, from) });
+      continue;
+    }
+    /* A GLOB MAPS TO A DESTINATION DIRECTORY, and a glob that matches nothing must say so rather
+     * than contribute zero silently — an empty glob is the same shrunken denominator one level in. */
+    const dir = path.resolve(base, path.dirname(from));
+    const rx = new RegExp('^' + path.basename(from).split('*').map(escapeRx).join('.*') + '$');
+    let names = [];
+    try { names = fs.readdirSync(dir).filter(function (n) { return rx.test(n); }); } catch (e) { names = []; }
+    if (!names.length) { entries.push({ from: from, to: to, src: null, emptyGlob: true }); continue; }
+    for (const n of names) {
+      entries.push({ from: path.posix.join(path.dirname(from).split('\\').join('/'), n), to: to + n, src: path.join(dir, n) });
+    }
+  }
+  return { error: null, entries: entries, declared: Object.keys(res).length };
+}
+
+function releaseDir() {
+  for (const d of candidateDirs()) {
+    try { if (fs.existsSync(path.join(d, "BOOT.md"))) return d; } catch (_) {}
+  }
+  return null;
+}
+
+const ITEMS = [
+  {
+    id: 'seed-carrier',
+    title: 'the documents a fresh room reads match the repo',
+    why: 'Eighth landed-is-not-shipped (034685f). The rename is correct in the repo; rooms read the app bundle. ' +
+      'Widened 2026-08-25 after pane E found the item checking 5 of the bundle while BUILDING.md shipped drifted.',
+    how: 'node consonance/tools/open-items.js — md5 of every file in tauri.conf.json bundle.resources against the built copy in releaseDir()',
+    check() {
+      const bundle = bundleResources();
+      if (bundle.error) {
+        /* NO FALLBACK, ON PURPOSE. See bundleResources()'s header: a fallback list is how the
+         * hardcoded list survives, and the hardcoded list is what made this item's universe false. */
+        return {
+          state: 'UNKNOWN',
+          detail: 'cannot enumerate what ships — ' + bundle.error,
+          universe: { seen: 0, skipped: 0, rule: 'the authority is bundle.resources in ' +
+            'consonance/src-tauri/tauri.conf.json and it could not be read. This item has NO ' +
+            'hardcoded fallback by design — a list this file maintains cannot audit itself.',
+            skippedList: [bundle.error] },
+        };
+      }
+      if (!bundle.entries.length) {
+        /* ARMEDNESS, not tidiness. carrier-drift's rule, applied here: "a registry with no
+         * withdrawals in it is not a green tree, it is an unarmed instrument." A bundle that
+         * resolves to zero files gives this check nothing to find, and a green over nothing is a
+         * structural zero — the species-B failure, refused rather than printed. */
+        return {
+          state: 'UNKNOWN',
+          detail: 'bundle.resources declares ' + bundle.declared + ' entr(ies) and they resolved to ZERO ' +
+            'files — refusing a verdict over an empty corpus; this check could not fail if it tried',
+          universe: { seen: 0, skipped: 0, rule: bundle.declared + ' declared entr(ies) in tauri.conf.json, 0 resolved',
+            skippedList: ['every declared entry resolved to nothing'] },
+        };
+      }
+      const dirs = candidateDirs();
+      const dir = releaseDir();
+      if (!dir) {
+        return {
+          state: 'UNKNOWN',
+          // Inline candidateDirs() on purpose: open-items-build.test.js pins this spelling,
+          // and the intent it pins (the UNKNOWN branch must NAME what it searched) is exactly
+          // this change's own thesis — an absence you did not search for is not a finding.
+          detail: 'no build found — looked in ' + candidateDirs().join(' , '),
+          universe: { seen: bundle.entries.length, skipped: bundle.entries.length,
+            rule: bundle.entries.length + ' file(s) resolved from tauri.conf.json bundle.resources, ' +
+              'all unreachable: no build dir among the ' + dirs.length + ' candidates carries BOOT.md',
+            skippedList: ['no build directory — every shipped file is uncomparable'] },
+        };
+      }
+      /* EVERY BUNDLED FILE, not the briefs alone and certainly not SEED alone. A stale LIBRARIAN.md
+       * sends that seat to a dead notes path; a stale COMMITTEE.md briefs a pane with retired rules;
+       * a stale BUILDING.md teaches a rule its author has already corrected. Which files those are
+       * is not this file's opinion — it is whatever tauri.conf.json ships.
+       *
+       * AND THE SKIP IS COUNTED, in a space wide enough for the skip to exist in. Two versions of
+       * this loop were wrong in the same direction: the first `continue`d silently when a side was
+       * unreadable, and the second counted those skips against a five-name list that had already
+       * omitted the sixth file. A skip counter only means something over a denominator somebody
+       * else decided. */
+      const drift = [];
+      const skipped = [];
+      let compared = 0;
+      for (const e of bundle.entries) {
+        if (e.emptyGlob) { skipped.push(e.from + ' (glob matched NOTHING in the repo — it ships zero files)'); continue; }
+        const a = md5(e.src);
+        const b = md5(path.join(dir, e.to));
+        if (!a && !b) { skipped.push(e.to + ' (absent from BOTH repo and build)'); continue; }
+        if (!a) { skipped.push(e.to + ' (absent from the REPO — the build carries one the repo does not)'); continue; }
+        if (!b) { skipped.push(e.to + ' (absent from the BUILD — a fresh room never reads it)'); continue; }
+        compared++;
+        if (a !== b) drift.push(e.to);
+      }
+      const universe = {
+        seen: bundle.entries.length,
+        skipped: skipped.length,
+        rule: bundle.declared + ' entr(ies) in tauri.conf.json bundle.resources resolving to ' +
+          bundle.entries.length + ' file(s) (globs expanded), compared repo vs ' + dir +
+          '. THE LIST IS NOT MAINTAINED HERE — it is read from what the installer ships, because a ' +
+          'list this file keeps can only report skips against itself. A file is SKIPPED when either ' +
+          'side is unreadable, and which side is named.',
+        skippedList: skipped,
+      };
+      if (!compared) return { state: 'UNKNOWN', detail: 'build at ' + dir + ' carries none of the ' +
+        bundle.entries.length + ' shipped files to compare', universe };
+      if (skipped.length) {
+        /* A shipped file absent from the BUILD is not a passing comparison — it is the failure this
+         * item exists to catch, in its most complete form. Say OPEN. */
+        return { state: 'OPEN', detail: compared + ' of ' + bundle.entries.length + ' compared' +
+          (drift.length ? ', ' + drift.join(', ') + ' DRIFTED' : ', no drift among them') +
+          ' — but ' + skipped.length + ' could not be compared at all: ' + skipped.join('; '), universe };
+      }
+      if (!drift.length) {
+        return { state: 'CLOSED', detail: compared + ' shipped file(s) byte-identical to the repo in ' + dir, universe };
+      }
+      return { state: 'OPEN', detail: drift.join(', ') + ' differ from the built copy (' + compared +
+        ' of ' + bundle.entries.length + ' compared) — a fresh spawn reads the STALE one until a rebuild', universe };
+    },
+  },
+  {
+    id: 'hold-userprompt-submit',
+    title: 'the userprompt-submit.js two-way conflict',
+    why: '83 real lines differ — 69 only in the repo including a BOM-strip fix, 14 only on this machine. The installer refuses to decide it.',
+    how: 'the Hold flag on the manifest entry, plus md5 of the repo copy against THE COPY THIS MACHINE IS REGISTERED TO RUN',
+    check() {
+      const inst = path.join(REPO, 'dev/shell/install.ps1');
+      let src;
+      try { src = fs.readFileSync(inst, 'utf8'); }
+      catch (e) { return { state: 'UNKNOWN', detail: 'install.ps1 unreadable' }; }
+      const held = /userprompt-submit\.js';[^\n]*Hold\s*=\s*\$true/.test(src);
+      const repoPath = path.join(REPO, 'dev/shell/hooks/userprompt-submit.js');
+      const a = md5(repoPath);
+
+      /* THE UNIT IS THE REGISTERED PATH, AND IT IS NOT A PATH THIS FILE GUESSES.
+       *
+       * Until 2026-08-25 this check hashed HOME/.claude/shell/hooks/userprompt-submit.js — a path
+       * chosen because the MANIFEST names it, never because anything loads from it. This laptop's
+       * destination layout is flat and has no hooks\ directory at all, so `b` was null on every run
+       * and the verdict fell out of that nullness rather than out of the conflict.
+       *
+       * P-UNIVERSE clause 2, run on this instrument in both directions before it was changed:
+       *   the repo copy placed where this machine ACTUALLY loads hooks  -> verdict UNCHANGED, OPEN
+       *   the repo copy placed at hooks\, which nothing loads from      -> verdict flipped to CLOSED
+       * A positive drawn from the instrument's own unit fired. A positive drawn from the phenomenon
+       * could not move it — and the one that fired produced a FALSE CLOSED, so the trap does not
+       * merely fail to prove armedness, it can be used to close the item. That is §8e's abuse
+       * condition, measured, and this is the instrument it was measured on.
+       *
+       * So the authority is settings.json and THERE IS NO FALLBACK PATH. Unreadable means UNKNOWN:
+       * hashing a path nobody registered is the entire defect above, and a fallback is how a guessed
+       * path survives the fix that removed it. */
+      const settingsPath = process.env.OPEN_ITEMS_SETTINGS || path.join(HOME, '.claude/settings.json');
+      let S = null, why = null;
+      /* \uFEFF as an ESCAPE, never a literal BOM in the source: an invisible character inside a
+       * regex is unreviewable, and this repo already lost eight hours to an em-dash sitting inside
+       * a generated .vbs. PowerShell's `Set-Content -Encoding utf8` prepends a BOM and JSON.parse
+       * rejects it outright, so a settings.json written that way is unreadable to every Node
+       * consumer while still looking fine to PowerShell. */
+      try { S = JSON.parse(fs.readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, '')); }
+      catch (e) { why = fs.existsSync(settingsPath) ? 'settings.json does not parse' : 'no settings.json at ' + settingsPath; }
+
+      /* Matched on EXACT leaf equality, never substring: `stop.js` is a substring of
+       * `sourced-stop.js` and matching bare cost install.ps1 a destroyed registration on
+       * 2026-08-17 11:59. Exact equality cannot reproduce that. */
+      let ranAt = null;
+      const otherUps = [];
+      if (S) {
+        for (const g of [].concat((S.hooks && S.hooks.UserPromptSubmit) || [])) {
+          for (const h of [].concat((g && g.hooks) || [])) {
+            if (!h || !h.command) continue;
+            const q = h.command.match(/"([^"]*)"/g);
+            const p2 = q && q.length ? q[q.length - 1].replace(/"/g, '') : h.command.trim();
+            /* path.win32.basename, not a hand-rolled character class: the first version of this
+             * line shipped as [^\/]+$ because one backslash of the pair was eaten in transit, which
+             * means it matched "not a forward slash" and returned the WHOLE Windows path. It ran
+             * clean and the leaf comparison silently never matched. Caught by reading the output,
+             * not by the code failing. win32.basename handles both separators on any platform. */
+            const leaf = path.win32.basename(p2);
+            if (leaf.toLowerCase() === 'userprompt-submit.js') ranAt = p2;
+            else otherUps.push(leaf);
+          }
+        }
+      }
+      const b = ranAt ? md5(ranAt) : null;
+
+      const universe = {
+        seen: 1 + (ranAt ? 1 : 0),
+        skipped: (a ? 0 : 1) + (S ? (ranAt && !b ? 1 : 0) : 1),
+        rule: 'the repo copy at ' + repoPath + ', against whatever ' + settingsPath +
+          ' registers on UserPromptSubmit' +
+          (S ? (ranAt ? ' (' + ranAt + ')' : ' — nothing named userprompt-submit.js') : ' (unreadable)') +
+          '. A copy sitting at a path nothing loads from is NOT a side of this conflict, however byte-identical it is.',
+        skippedList: [].concat(
+          a ? [] : ['repo copy unreadable'],
+          S ? [] : [why + ' — the registered path is UNKNOWN and this check does not guess one'],
+          (S && ranAt && !b) ? ['the registered command names ' + ranAt + ', which is unreadable'] : []),
+      };
+
+      if (!held) return { state: 'CLOSED', detail: 'Hold flag removed from the manifest — somebody resolved it', universe };
+      if (!S) return { state: 'UNKNOWN', detail: why + ' — cannot tell what this machine runs, so the conflict cannot be scored', universe };
+      if (!ranAt) {
+        return { state: 'OPEN', detail: 'still HELD, and NOT LIVE ON THIS MACHINE — nothing named userprompt-submit.js is registered on UserPromptSubmit' +
+          (otherUps.length ? ' (it runs ' + otherUps.join(', ') + ')' : '') +
+          '. The 83-line conflict was measured on the desktop and cannot be scored from here.', universe };
+      }
+      if (a && b && a === b) return { state: 'CLOSED', detail: 'the copy this machine RUNS (' + ranAt + ') is byte-identical to the repo — drop the Hold flag', universe };
+      return { state: 'OPEN', detail: 'still HELD · repo ' + (a || '?') + ' vs the registered copy ' + (b || 'unreadable') + ' at ' + ranAt, universe };
+    },
+  },
+  {
+    id: 'f1-vantage-clock',
+    title: 'F1 — the blind reader\u2019s thirty-day kill window',
+    why: 'build_ruling C4: thirty days live with zero true DISAGREEs and the reader is deleted. The clock starts at its first fire.',
+    how: 'rows in vantage_findings.jsonl, and days since the first vantage_runs.log entry',
+    check() {
+      const data = process.env.VANTAGE_DATA || 'C:/Consonance/data';
+      const runs = path.join(data, 'vantage_runs.log');
+      const finds = path.join(data, 'vantage_findings.jsonl');
+      // COUNT VERDICTS, NEVER ROWS. The first version of this check counted lines in the findings
+      // ledger and reported CLOSED — "7 findings filed". Six of those seven were UNLAUNCHABLE: the
+      // reader never ran on them. A row is an ATTEMPT; only a verdict is an OUTCOME, and F1 asks
+      // whether the reader produces, not whether it tried. Counting the artifact instead of the
+      // outcome is the exact defect this file exists to catch — committed inside it, ten minutes
+      // after it was written, and found by running it.
+      const led = readLedger(finds);
+      const rows = led.rows;
+      const universe = {
+        seen: led.lines,
+        skipped: led.unparseable,
+        rule: led.missing
+          ? 'no ' + finds + ' — zero rows seen, which is NOT the same as zero attempts made'
+          : led.lines + ' line(s) in ' + finds + ', one JSON object per line; a line that will not parse is counted here, never dropped from the denominator',
+        skippedList: led.unparseable ? [led.unparseable + ' line(s) did not parse — their outcome is UNKNOWN, not absent'] : [],
+      };
+      const verdicts = rows.filter((r) => r && r.verdict).length;
+      const unlaunchable = rows.filter((r) => r && r.status === 'UNLAUNCHABLE').length;
+      if (verdicts > 0) {
+        return { state: 'CLOSED', detail: verdicts + ' verdict(s) of ' + rows.length + ' attempt(s) — F1 cannot fire while the reader produces', universe };
+      }
+      if (rows.length) {
+        return { state: 'OPEN', detail: rows.length + ' attempt(s), 0 verdicts (' + unlaunchable + ' unlaunchable) — trying is not producing', universe };
+      }
+      if (!fs.existsSync(runs)) {
+        return { state: 'OPEN', detail: 'no vantage_runs.log — the reader has never fired, so F1 has not started', universe };
+      }
+      let first = null, days = '?';
+      try {
+        const lines = fs.readFileSync(runs, 'utf8').trim().split(/\r?\n/).filter(Boolean);
+        const m = lines[0] && lines[0].match(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/);
+        if (m) { first = m[0]; days = Math.floor((Date.now() - Date.parse(first)) / 86400000); }
+      } catch (e) { /* leave unknown */ }
+      return { state: 'OPEN', detail: '0 findings, ' + days + ' of 30 days since ' + (first || 'first fire'), universe };
+    },
+  },
+  {
+    id: 'vantage-reach',
+    title: "the artifact tier's real reach on this machine",
+    why: 'C1 routes artifact-bound claims at 100%, on the assumption that an artifact is a repo file. Measured 2026-08-18: 16 of 17 artifact-tier rows point at ~/.claude/shell/ — digests, duration-goal state, drift-watch findings, plan files. None is under version control, so resolveHeads correctly returns {} and C2 correctly refuses. Nothing is broken; the tier reaches less than its name implies.',
+    how: 'share of artifact-tier ledger rows whose heads{} is empty',
+    check() {
+      const data = process.env.VANTAGE_DATA || 'C:/Consonance/data';
+      const led = path.join(data, 'sourced_ledger.jsonl');
+      const r = readLedger(led);
+      const rows = r.rows;
+      const art = rows.filter((x) => Array.isArray(x.claims) && x.claims.some((c) => c && c.channel === 'artifact'));
+      /* TWO NESTED DENOMINATORS, and only the inner one was ever printed. The percentage below is
+       * over ARTIFACT-TIER rows; the reader is owed both how many rows existed and how many of
+       * them this question even applies to, or "16 of 17" reads as a share of the ledger. */
+      const universe = {
+        seen: r.lines,
+        skipped: r.unparseable + (rows.length - art.length),
+        rule: r.missing
+          ? 'no ' + led + ' — zero rows seen'
+          : r.lines + ' line(s) in ' + led + '; ' + r.unparseable + ' unparseable, ' +
+            (rows.length - art.length) + ' carry no artifact-tier claim (out of scope for this question), ' +
+            art.length + ' scored',
+        skippedList: r.unparseable ? [r.unparseable + ' line(s) did not parse'] : [],
+      };
+      if (r.missing) return { state: 'UNKNOWN', detail: 'no sourced_ledger.jsonl', universe };
+      if (!art.length) return { state: 'UNKNOWN', detail: 'no artifact-tier rows yet', universe };
+      const noHead = art.filter((x) => !x.heads || !Object.keys(x.heads).length).length;
+      const pct = Math.round((noHead / art.length) * 100);
+      if (pct >= 50) {
+        return { state: 'OPEN', detail: noHead + ' of ' + art.length + ' artifact rows (' + pct + '%) are outside any repo — unreachable by design, and the tier does not say so', universe };
+      }
+      return { state: 'CLOSED', detail: noHead + ' of ' + art.length + ' artifact rows outside a repo (' + pct + '%) — the tier mostly reaches', universe };
+    },
+  },
+  {
+    id: 'actors-canary',
+    title: 'the actors.test.js canary is red and js-suite exits 0 over it',
+    why: '354ad79 argued a canary must not become a suppression bucket. The classification is honest; the suppression is still in force.',
+    how: 'run actors.test.js directly and read ITS exit code, not the suite runner\u2019s',
+    check() {
+      const p = path.join(REPO, 'consonance/tools/actors.test.js');
+      /* THE UNIVERSE HERE IS ONE FILE, and saying so is the honest half. js-suite DISCOVERS its
+       * canaries by walking the tree; this checks the one file somebody named. If a second file
+       * ever declares EXPECTED-RED, js-suite sees it and this does not — and the two would then
+       * disagree again, for a different reason than they disagreed on 2026-08-24.
+       *
+       * NOT A DENOMINATOR BUG, and worth being exact about because this item is cited as one. The
+       * bb3d92c defect was a loose PATTERN over the right file, not a right pattern over the wrong
+       * set — see the P-UNIVERSE registration, which excludes it from the class and puts it in the
+       * duplicated-rule class instead. The fix copied js-suite.js:140 VERBATIM with a comment
+       * saying the two "cannot drift apart again"; copying is precisely how they drifted the first
+       * time. js-suite.js has no module.exports, so this cannot require the real one. */
+      const universe = {
+        seen: 1,
+        skipped: fs.existsSync(p) ? 0 : 1,
+        rule: 'exactly one named file, consonance/tools/actors.test.js — NOT a walk. js-suite ' +
+          'discovers canaries across the tree; a canary declared anywhere else is invisible here. ' +
+          'The marker pattern is a hand-copy of js-suite.js:140, not a shared import.',
+        skippedList: fs.existsSync(p) ? [] : ['actors.test.js absent'],
+      };
+      if (!fs.existsSync(p)) return { state: 'CLOSED', detail: 'file gone', universe };
+      /* ANCHORED, not a substring search. A bare /EXPECTED-RED/ matches the marker quoted inside
+       * a comment ABOUT the marker — which is exactly what pane A left behind when it removed the
+       * real declaration (6cf7504, actors.test.js:12). This instrument then reported the canary as
+       * declared-and-singing while js-suite, which anchors, reported 0 canary. Two instruments,
+       * one file, opposite answers.
+       *
+       * Fourth instance of the self-reference class here: js-suite failing on itself (08-17), the
+       * shelf test matching "## THE SHELF IS TIERED" in prose (08-24), C's census greps matching
+       * its own scorecard (08-24). The pattern below is js-suite.js:140 VERBATIM so the two
+       * cannot drift apart again. */
+      const declared = /^\s*(\/\/|#)\s*JS-SUITE:\s*EXPECTED-RED/m.test(fs.readFileSync(p, 'utf8'));
+      const red = sh('node "' + p + '"') === null;
+      if (!red && declared) {
+        return { state: 'OPEN', detail: 'declared EXPECTED-RED but now GREEN — a canary singing is itself a failure', universe };
+      }
+      if (!red) return { state: 'CLOSED', detail: 'green, and not declared red', universe };
+      return { state: 'OPEN', detail: 'red by declaration — resolve the unresolved board ids, or give it an expiry', universe };
+    },
+  },
+];
+
+const rows = ITEMS.map((it) => {
+  let r;
+  try { r = it.check(); }
+  catch (e) { r = { state: 'ERROR', detail: e.message }; }
+  /* An item with no universe is reported as such rather than given a default. A missing
+   * denominator that prints as "1 seen / 0 skipped" is the failure this whole change is against,
+   * committed inside the change itself. */
+  return { id: it.id, title: it.title, state: r.state, detail: r.detail, why: it.why, how: it.how,
+           universe: r.universe || null };
+});
+
+if (process.argv.includes('--json')) {
+  console.log(JSON.stringify(rows, null, 2));
+  process.exit(0);
+}
+
+const open = rows.filter((r) => r.state === 'OPEN').length;
+console.log('\nOPEN ITEMS — computed, not remembered');
+console.log('(a commitment held only as prose survives a compaction at 3.5%; these are recomputed every run)\n');
+for (const r of rows) {
+  console.log('  ' + r.state.padEnd(8) + r.title);
+  console.log('          ' + r.detail);
+  console.log('          check: ' + r.how);
+  if (!r.universe) {
+    console.log('          universe: NOT DECLARED — this item\'s check() returns no denominator, so');
+    console.log('                    its verdict is over an unstated surface');
+  } else {
+    const u = r.universe;
+    console.log('          universe: ' + u.seen + ' seen · ' + u.skipped + ' skipped · ' + u.rule);
+    for (const sk of (u.skippedList || [])) console.log('                    SKIPPED: ' + sk);
+  }
+  console.log('');
+}
+console.log('  ' + open + ' of ' + rows.length + ' still open.');
+/* THE INSTRUMENT'S OWN UNIVERSE, and it is the one that cannot be repaired by printing.
+ * Everything above is a reading of the commitments SOMEBODY WROTE A CHECK FOR. That set is
+ * hand-maintained, so a commitment nobody encoded is not CLOSED here — it is ABSENT, and absent
+ * reads exactly like done. No walk can find it: there is no directory of things that are owed. */
+const noUniverse = rows.filter((r) => !r.universe).length;
+const errored = rows.filter((r) => r.state === 'ERROR').length;
+console.log('');
+console.log('  universe — what this instrument could and could not see');
+console.log('    ' + rows.length + ' item(s) defined · ' + (rows.length - errored) + ' checked · ' +
+  errored + ' errored · ' + noUniverse + ' with no declared denominator');
+console.log('    rule: an item exists here only because someone wrote a check() for it. THIS');
+console.log('          DENOMINATOR IS HAND-MAINTAINED AND CANNOT BE WALKED — a commitment with no');
+console.log('          check is not CLOSED, it is ABSENT, and absent reads exactly like done.');
+console.log('');
+process.exit(0);

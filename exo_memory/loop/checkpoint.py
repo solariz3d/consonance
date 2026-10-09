@@ -1,0 +1,560 @@
+"""
+checkpoint.py -- make the compaction gap survivable, without needing to remember to.
+
+WHAT WENT WRONG THAT THIS FIXES. On 2026-07-27 the chair hit ~900k context mid-refactor,
+with `drawCarLights` half-converted: pooled buffers declared, call signature changed, the
+rest of the function still on the old shape. A partially-applied change is the single worst
+thing to carry across a context turnover, because the instance on the far side cannot tell
+intent from accident -- it reads as either "someone was mid-thought" or "someone shipped
+this," and those want opposite repairs. The fix that day was to revert it and hand-write a
+handoff. That worked because the keeper happened to warn us. This removes the happening.
+
+The tool does NOT compact. Compaction is automatic and the loop already resumes through it
+fine; the failure was never the gap, it was arriving at the gap unprepared. So this reports
+what is in flight and, wired to the PreCompact hook, does it whether or not anyone remembers.
+
+WHAT IT REPORTS, and why each line is here:
+  * every repo it watches, its HEAD, and its DIRTY FILES -- uncommitted work IS the in-flight
+    state, and naming it is most of the handoff;
+  * a syntax check on dirty JS, because "half-applied" and "does not parse" overlap heavily
+    and a parse error is the cheapest possible detector for it;
+  * an ABSOLUTE context estimate -- conversation characters since the last compaction, never a
+    percentage, because nothing here can read the model's real window (see below);
+  * the loop's standing commitments, re-read from disk rather than remembered, per
+    maintenance law 1: recall from the master, never a copy of a copy.
+
+    py exo_memory/loop/checkpoint.py                 # report to stdout
+    py exo_memory/loop/checkpoint.py --write         # also write CHECKPOINT.md
+    py exo_memory/loop/checkpoint.py --transcript P  # estimate context from transcript P
+"""
+import argparse, datetime, json, pathlib, subprocess, sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+OUT = HERE / "CHECKPOINT.md"
+
+# Repos the loop actually touches. Absent ones are skipped, not an error -- this runs on
+# whatever machine the room woke up on.
+WATCH = [REPO, pathlib.Path.home() / "Desktop" / "blackbox"]
+
+# THE NUMBER IS READ, NOT ESTIMATED -- and that correction is the fourth and largest.
+#
+# History, because the shape of the error repeated and the shape is the lesson. First this
+# sized the whole transcript and reported 599% of budget. Then it measured from the last
+# compaction boundary and reported 69% while the client said 39%, which found that
+# BUDGET_TOKENS was invented -- so the percentage was dropped and an absolute chars/4 estimate
+# published in its place, with a careful note that the DENOMINATOR could not be known.
+#
+# All three fixes worked on the denominator. The NUMERATOR was wrong too, and by more:
+# measured 2026-07-29, this reported 301,477 tokens when the real figure was 994,521. It was
+# 3.3x low. Counting message text cannot work, because the window also holds the system
+# prompt, CLAUDE.md, every tool schema, and hook output -- none of which live under the keys
+# `walk` visits, and all of which are billed.
+#
+# The authoritative figure was in the file this already opens. Every assistant record carries
+# `message.usage`, and input_tokens + cache_read_input_tokens + cache_creation_input_tokens IS
+# the context that turn was charged for. Not an estimate of it. Three rounds of refining a
+# guess, while the measurement sat on the same lines being parsed -- the room's own
+# wrong-artifact groove, committed by the instrument built to catch it.
+CHARS_PER_TOKEN = 4          # fallback only, for a transcript with no usage records yet
+
+
+def git(repo, *args):
+    try:
+        r = subprocess.run(["git", "-C", str(repo), *args],
+                           capture_output=True, text=True, timeout=20)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def repo_state(repo):
+    if not (repo / ".git").exists():
+        return None
+    # `git status --short` is XY<space>path: the status field is exactly TWO columns, and
+    # slicing three ate the first letter of every path whose X column was set.
+    dirty = [l[2:].strip() for l in git(repo, "status", "--short").splitlines() if l.strip()]
+    st = {
+        "path": str(repo),
+        "head": git(repo, "log", "--oneline", "-1"),
+        "branch": git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
+        "dirty": dirty,
+        "unparseable": [],
+    }
+    # A dirty .js that does not parse is very likely a half-applied edit. This is the whole
+    # reason the tool exists, so it is checked rather than assumed.
+    for f in dirty:
+        if not f.endswith(".js"):
+            continue
+        p = repo / f
+        if not p.exists():
+            continue
+        try:
+            r = subprocess.run(["node", "--check", str(p)],
+                               capture_output=True, text=True, timeout=20)
+            if r.returncode != 0:
+                st["unparseable"].append(f)
+        except (OSError, subprocess.SubprocessError):
+            pass          # no node here: absence of a check is not evidence of a problem
+    return st
+
+
+def usage_total(rec):
+    """Tokens the model was actually charged for on this turn, or None.
+
+    All three fields are context. `cache_read_input_tokens` is the big one and is easy to drop
+    by accident -- it is the part of the window served from cache, which is most of it once a
+    session is warm. Omitting it is how a reading looks plausible and lands 10x low.
+    """
+    u = (rec.get("message") or {}).get("usage")
+    if not isinstance(u, dict):
+        return None
+    t = ((u.get("input_tokens") or 0)
+         + (u.get("cache_read_input_tokens") or 0)
+         + (u.get("cache_creation_input_tokens") or 0))
+    return t or None
+
+
+def context_estimate(transcript):
+    """Live context, READ from the usage records, bounded by the last compaction.
+
+    The transcript accumulates across compactions -- it is the session's whole history, not
+    what is currently in the window. Claude Code writes a
+    `{"type":"system","subtype":"compact_boundary"}` record at each compaction, so the live
+    cycle is what follows the last one.
+
+    Three numbers come out, and they answer different questions:
+      live  -- the newest usage reading. What is in the window now.
+      floor -- the first reading AFTER the boundary. What a compaction costs before any work:
+               summary, CLAUDE.md, tool schemas, hooks. Runway is live minus floor, not live.
+      peak  -- the highest reading seen BEFORE the boundary. A LOWER BOUND on the window and
+               emphatically not the window itself, because a manual /compact ends a cycle
+               wherever the human happened to type it. Calling it the ceiling would re-invent
+               the denominator in a new costume.
+    """
+    p = pathlib.Path(transcript)
+    if not p.exists():
+        return None
+
+    def walk(x, acc):
+        """Count only what is actually conversation: message text, thinking, tool results.
+
+        Sizing raw lines counts JSON scaffolding, per-record metadata and escaping, which
+        inflated the first estimate by roughly 7x. Counting message text alone deflated it,
+        because tool RESULTS are in the window too and live under a different key.
+        """
+        if isinstance(x, str):
+            acc[0] += len(x)
+        elif isinstance(x, list):
+            for i in x:
+                walk(i, acc)
+        elif isinstance(x, dict):
+            for k, v in x.items():
+                if k in ("text", "thinking", "content", "output", "stdout", "stderr"):
+                    walk(v, acc)
+
+    acc, compacted = [0], False
+    live = floor = None
+    peak = 0                    # highest reading in the PREVIOUS cycle
+    running_peak = 0            # highest in the cycle being read right now
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"compact_boundary"' in line:
+                    acc[0] = 0                     # restart at the newest boundary
+                    compacted = True
+                    peak, running_peak = running_peak, 0
+                    live = floor = None
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                t = usage_total(rec)
+                if t:
+                    live = t
+                    running_peak = max(running_peak, t)
+                    if floor is None:
+                        floor = t
+                walk((rec.get("message") or {}).get("content"), acc)
+                for k in ("toolUseResult", "hookAdditionalContext"):
+                    if k in rec:
+                        walk(rec[k], acc)
+    except OSError:
+        return None
+    return {"chars": acc[0], "compacted": compacted, "live": live, "floor": floor,
+            "prev_peak": peak or None,
+            "est_tokens": acc[0] // CHARS_PER_TOKEN}
+
+
+# Register the work is actually done in. Same list harvest.py uses, deliberately: a finding
+# and an indexable line are the same object seen at two moments.
+FINDING_RX = __import__("re").compile(
+    r"\b(muscle group|groove|flinch|seat-brace|deflation-as-rigor|independence-fetish|"
+    r"rank gradient|keeper-adjacency|blind pair|honest null|null result|keeper-caught|"
+    r"committee-caught|self-caught|coupling|new group|countermeasure|mention-vs-use)\b",
+    __import__("re").I)
+
+
+def unwritten_findings(transcript, limit=8):
+    """Findings produced in the live window that never reached the map.
+
+    THE ASYMMETRY THIS EXISTS FOR. On 2026-07-27 the keeper said "there were more found by
+    laptop instances and should have been put into the consonance repo. I am scared." The
+    tell-index those instances built DID reach the repo; the findings did not. That is not a
+    discipline gap, it is a structural one: code is written INTO the tree by default -- you
+    edit a file and it is there -- while a finding lives in the conversation and only lands
+    if someone transcribes it. The transcript then expires on a 30-day clock.
+
+    So this is an absent-trigger fix, which is the only kind that works on a blind spot: at
+    the moment things get lost -- the gap -- say which claims in the live window have no
+    counterpart in the map. It is deliberately imprecise. Over-reporting is survivable here
+    because the cost of a false positive is re-reading one sentence, and the cost of a false
+    negative is a finding that exists nowhere.
+    """
+    import re
+    p = pathlib.Path(transcript)
+    mp = REPO / "exo_memory" / "muscle_map.md"
+    if not p.exists() or not mp.exists():
+        return None
+    written = re.sub(r"\W+", " ", mp.read_text(encoding="utf-8", errors="replace").lower())
+
+    lines, seen = [], set()
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as fh:
+            live = False
+            for line in fh:
+                if '"compact_boundary"' in line:
+                    lines, seen, live = [], set(), True    # restart at the newest boundary
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("type") != "assistant":
+                    continue
+                c = (rec.get("message") or {}).get("content")
+                text = "\n".join(b.get("text", "") for b in c
+                                 if isinstance(b, dict) and b.get("type") == "text") \
+                    if isinstance(c, list) else (c if isinstance(c, str) else "")
+                for sent in re.split(r"(?<=[.!?])\s+", text):
+                    sent = " ".join(sent.split())
+                    if len(sent) < 60 or len(sent) > 400 or not FINDING_RX.search(sent):
+                        continue
+                    # Is this claim already in the map? Compare on a distinctive middle slice
+                    # rather than the whole sentence, which never matches verbatim.
+                    key = re.sub(r"\W+", " ", sent.lower())
+                    probe = " ".join(key.split()[3:11])
+                    if probe and probe in written:
+                        continue
+                    h = probe or key[:60]
+                    if h in seen:
+                        continue
+                    seen.add(h)
+                    lines.append(sent)
+    except OSError:
+        return None
+    if not live:
+        return None
+    return {"total": len(lines), "sample": lines[-limit:]}
+
+
+def instrument(script, args=(), keep=10, label=None):
+    """Run one node instrument and fold its answer in, unbidden.
+
+    WHY THESE ARE HERE AT ALL. residue.js was wired to the PreCompact hook because a tool that
+    only works when somebody remembers to run it has the failure this whole line of work exists
+    to delete. Then three more instruments got built -- corrections-gate, whats-live, sourced --
+    and none of them inherited that lesson. All three sat waiting to be invoked, which IS their
+    default failure: an instrument whose output is never read contributes nothing and still
+    counts on the trigger tally.
+
+    So the tally was an upper bound pretending to be a count. Wiring them here makes the number
+    honest rather than aspirational.
+
+    HONEST LIMIT, stated because it is the whole reason this is not a solution: arriving
+    unbidden fixes output-never-read. It does nothing for output-read-and-ignored. The gap-dream
+    arrived unbidden on 2026-07-29, was read, was quoted back approvingly, and changed nothing
+    for seven hours. No checkpoint line can force an act.
+    """
+    p = REPO / script
+    if not p.exists():
+        return None
+    try:
+        r = subprocess.run(["node", str(p), *args], cwd=str(REPO), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=120)
+    except Exception:
+        return None          # a sensor that fails must never block a compaction
+    out = [l for l in (r.stdout or "").splitlines() if l.strip()]
+    if not out:
+        return None
+    head = [f"### {label or p.name}" + (f"  (exit {r.returncode})" if r.returncode else "")]
+    return head + out[:keep]
+
+
+def residue(limit=14):
+    """Run B's residue sensor and fold its report in.
+
+    THE POINT OF WIRING IT HERE. `residue.js` refuses to set a threshold, deliberately and
+    correctly -- every shape it prints has an innocent reading it cannot rule out, and a
+    tool that decided on those would be lying. But that refusal is exactly what kept it a
+    SENSOR rather than a trigger: nothing goes red, so it only works if somebody remembers to
+    run it, and "somebody remembers" is the failure mode this whole line of work exists to
+    remove.
+
+    Firing it from the checkpoint converts sensor to trigger without adding a false threshold.
+    The report arrives unbidden, at the gap, whether or not anyone thought to ask -- and it
+    reads the residue, which is precisely the half of the record the chair does not examine
+    because it does not feel like conduct.
+    """
+    script = REPO / "consonance" / "tools" / "residue.js"
+    if not script.exists():
+        return None
+    try:
+        # encoding is explicit because residue.js prints arrows and warning glyphs, and
+        # subprocess defaults to the console codepage on Windows -- cp1252 raised
+        # UnicodeDecodeError on the first wiring, which the narrow except below did not catch.
+        # Fourth time this hazard has cost something today; it is in the ledger for a reason.
+        r = subprocess.run(["node", str(script)], cwd=str(REPO), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=90)
+    except Exception:
+        # Deliberately broad: this is a SENSOR on a checkpoint that must never block a
+        # compaction. Any failure means "no residue section this time", never a traceback.
+        return None
+    if r.returncode != 0:
+        return None
+    out, keep, section = r.stdout.splitlines(), [], False
+    for line in out:
+        # the two sections that are about conduct rather than volume
+        if line.startswith("CORRECTIONS THAT DELETE NOTHING") or line.startswith("ASSIGNMENT INTERVALS"):
+            section, keep = True, keep + ["", line]
+            continue
+        if section:
+            if line.strip() and not line.startswith(" "):
+                section = False        # next heading ends the section
+            elif line.strip():
+                keep.append(line)
+        if len(keep) >= limit:
+            break
+    return keep or None
+
+
+def demonstrated(limit=14):
+    """Fire A's `demogap` on the guards this session touched, unbidden.
+
+    WHY THIS ONE, AND WHY NOW. B's census measured what nobody had: 130 of 1,892 assertion
+    sites -- 6.9% -- have ever been observed firing for the right reason, and nine in ten real
+    changes to blackbox's source pass its 788 assertions unnoticed. But the finding that puts
+    this call here is narrower and sharper: reconstructing twelve red events from history,
+    NINE of the birth commits say nothing about them. A red in a working tree leaves no trace
+    anywhere. So the discipline does not merely degrade under load -- it degrades to
+    UNMEASURABLE WITHIN A DAY, and a guard written today is indistinguishable tomorrow from
+    one that was demonstrated. That is an argument for a mechanism at the gap, not for
+    remembering harder.
+
+    SCOPE, STATED SO NOBODY READS IT AS A VERDICT ON THE SUITE: `--ref HEAD~1` -- the last
+    commit plus the working tree. A session that made five commits sees only the fifth. That
+    undersells and never oversells, which is the correct direction for a sensor nobody asked
+    for. The suite-wide number is `--all`, takes five minutes, and does not belong on a
+    compaction path.
+
+    LIMITS. blackbox only: demogap hooks JS assertion helpers and there is no Rust equivalent
+    -- A measured the port at 13.6 s per mutant against 0.15 s and refused it, and the leg that
+    produced every real finding is a compile error there. So this covers one of two repos and
+    the header says so rather than letting a quiet section imply clean.
+
+    Silence is reserved for "nothing changed". A timeout or a crash prints a line instead of
+    vanishing, because a sensor whose failure looks like a pass is the defect this whole file
+    is about.
+    """
+    repo = pathlib.Path.home() / "Desktop" / "blackbox"
+    script = repo / "demogap.js"
+    if not script.exists():
+        return None
+    try:
+        r = subprocess.run(["node", str(script), "--ref", "HEAD~1"], cwd=str(repo),
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=110)
+    except subprocess.TimeoutExpired:
+        # VISIBLE, not silent. 0.1 s when no guards changed, ~12 s for one test file -- so a
+        # timeout means an unusually broad session, and "the check did not run" must never
+        # render as "the check found nothing".
+        return ["", "demogap TIMED OUT at 110s -- this session touched more guards than the "
+                    "gap-path budget covers. Run `node demogap.js --ref HEAD~1` by hand."]
+    except Exception:
+        return None          # a sensor must never block a compaction
+    out = [l for l in (r.stdout or "").splitlines() if l.strip()]
+    # Report only when there is a VERDICT, rather than suppressing the no-scope notice by
+    # matching its wording -- a lexical negative would break the first time A rephrases it,
+    # silently, in the direction of saying nothing. Positional test: does any line classify?
+    if not any(l.lstrip().startswith(("DEMONSTRATED", "UNDEMONSTRATED", "INERT", "COARSE"))
+               for l in out):
+        return None
+    return ["", "### GUARDS TOUCHED THIS SESSION — has any of them ever been seen firing?",
+            "(blackbox only; scope is HEAD~1 + working tree, never the suite. "
+            "Full audit: `node demogap.js --all`.)", ""] + out[:limit]
+
+
+def commitments():
+    """Re-read from the masters. Never paraphrased into this file.
+
+    cycle8_handoff.md is added by the LAPTOP side (2026-07-28). The desktop was not running
+    when its findings were written, so a live handoff was impossible and a board entry would
+    not have been read. This function is the surest trigger either machine has -- it fires at
+    every gap whether or not anyone remembers -- so the pointer is placed where it fires. That
+    is this file's own absent-trigger doctrine used for the thing it was built for, and the
+    list is the right place for it precisely because it is not a list anyone has to check.
+    """
+    out = []
+    for name in ("cycle4_handoff.md", "cycle4_preregistration.md", "cycle8_handoff.md"):
+        p = REPO / "exo_memory" / name
+        if p.exists():
+            out.append(f"{name} (modified {datetime.datetime.fromtimestamp(p.stat().st_mtime):%Y-%m-%d %H:%M})")
+    return out
+
+
+def main():
+    # The report now carries residue.js's arrows and warning glyphs, and Windows hands us a
+    # cp1252 stdout, which raises UnicodeEncodeError on print. Reading UTF-8 correctly was only
+    # half the fix -- the write side needed it too. Guarded because reconfigure() is 3.7+ and a
+    # checkpoint must never fail on its own plumbing.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--transcript", default=None)
+    ap.add_argument("--trigger", default="manual")
+    args = ap.parse_args()
+
+    now = datetime.datetime.now()
+    lines = [f"# Checkpoint -- {now:%Y-%m-%d %H:%M:%S} (trigger: {args.trigger})", ""]
+
+    if args.transcript:
+        ce = context_estimate(args.transcript)
+        if ce and ce["live"]:
+            since = "since the last compaction" if ce["compacted"] else "this session"
+            lines.append(f"**Context: {ce['live']:,} tokens** {since} -- read from "
+                         "`message.usage`, not estimated.")
+            if ce["floor"]:
+                lines.append(f"- Compaction floor: {ce['floor']:,} "
+                             "(summary, CLAUDE.md, tool schemas, hooks -- the cost before any "
+                             f"work). Work done this cycle: {ce['live'] - ce['floor']:,}.")
+            if ce["prev_peak"]:
+                lines.append(f"- Previous cycle reached {ce['prev_peak']:,} before compacting. "
+                             "That is a LOWER BOUND on the window, not the window: a manual "
+                             "/compact ends a cycle wherever the human typed it.")
+            lines += ["", "> Still no percentage, and now for a better reason than before. The "
+                      "numerator is measured; the denominator is a bound, and dividing by a "
+                      "bound produces a number that reads like precision and is not. **The "
+                      "client's own display is authoritative.**", ""]
+        elif ce:
+            # No usage records yet -- a brand-new cycle. Say which method produced the number.
+            lines += [f"**Context:** ~{ce['est_tokens']:,} tokens (ESTIMATED at "
+                      f"{CHARS_PER_TOKEN} chars/token -- no usage record in this cycle yet). "
+                      "This method measured 3.3x low the one time it was checked against the "
+                      "real figure; treat it as an order of magnitude.", ""]
+
+    risky = False
+    for repo in WATCH:
+        st = repo_state(repo)
+        if st is None:
+            continue
+        lines.append(f"## {st['path']}  [{st['branch']}]")
+        lines.append(f"- HEAD: `{st['head'] or '(none)'}`")
+        if st["dirty"]:
+            lines.append(f"- **{len(st['dirty'])} uncommitted file(s)** -- this IS the in-flight state:")
+            lines += [f"  - `{f}`" for f in st["dirty"]]
+        else:
+            lines.append("- clean")
+        if st["unparseable"]:
+            risky = True
+            lines.append("- **DOES NOT PARSE** -- almost certainly a half-applied edit. "
+                         "Finish it or revert it BEFORE the gap; do not carry it across:")
+            lines += [f"  - `{f}`" for f in st["unparseable"]]
+        lines.append("")
+
+    if args.transcript:
+        uf = unwritten_findings(args.transcript)
+        if uf and uf["total"]:
+            lines += [f"## {uf['total']} claim(s) in this window with no counterpart in a master in this line of record",
+                      "",
+                      "Findings die in the gap far more often than code does: code is written into",
+                      "the tree by default, a finding only lands if someone transcribes it. Most of",
+                      "these will be restatements -- check, don't trust the count.", ""]
+            lines += [f"- {s}" for s in uf["sample"]]
+            lines.append("")
+
+    rs = residue()
+    if rs:
+        lines += ["## Residue -- what the moves left behind, not the moves",
+                  "",
+                  "From `consonance/tools/residue.js`, built by pane B. It sets no thresholds "
+                  "on purpose, so it is fired here rather than left to be remembered. Every "
+                  "shape below has an innocent reading; open the commit before believing it.",
+                  ""]
+        lines += rs
+        lines.append("")
+
+    # THE OTHER THREE. Each was built as a trigger and left sitting until invoked, which made
+    # the trigger count an upper bound rather than a count. They arrive here whether or not
+    # anyone remembers, and they sit next to each other on purpose: a drift shows up in the
+    # comparison between them long before any single number crosses a line.
+    #
+    # Order is deliberate — the one that invalidates reasoning comes first. A stale binary makes
+    # every other number on this page a claim about the wrong artifact.
+    probes = [
+        ("consonance/tools/whats-live.js", (), 12,
+         "IS WHAT IS RUNNING WHAT IS COMMITTED — read this before trusting anything below"),
+        ("consonance/tools/corrections-gate.js", ("--since", "24 hours ago"), 8,
+         "DID CORRECTIONS LAND ON THEIR TARGET (exit 1 = filed beside it)"),
+        ("consonance/tools/sourced.js", (), 10,
+         "UNSOURCED VALUE-CLAIMS — a rate, not a grade; compare to the last checkpoint"),
+    ]
+    # `argv` not `args`: the loop variable shadowed argparse's namespace on the first version
+    # and every later reference to args.write blew up with 'tuple has no attribute write'. The
+    # checkpoint crashed before writing, and the PreCompact hook silently got a partial report —
+    # which is this week's recurring shape, an instrument that reports and does nothing.
+    fired = []
+    for script, argv, keep, label in probes:
+        out = instrument(script, argv, keep, label)
+        if out:
+            fired.append(out)
+    # demogap is fired through its own function rather than the generic probe list: it lives in
+    # the OTHER repo, and its no-op case prints a paragraph rather than nothing, which the
+    # generic path would fold in at every gap until the section trained the eye to skip it.
+    dg = demonstrated()
+    if dg:
+        fired.append(dg)
+    if fired:
+        lines += ["## Instruments — fired unbidden, not on request", ""]
+        for block in fired:
+            lines += block
+            lines.append("")
+        lines += ["> Arriving unbidden fixes output-never-read. It does NOT fix "
+                  "output-read-and-ignored — the gap-dream arrived unbidden, was quoted "
+                  "approvingly, and changed nothing for seven hours. Reading these is still an "
+                  "act nobody can automate.", ""]
+
+    c = commitments()
+    if c:
+        lines += ["## Standing commitments live in these files -- go read them, do not trust a summary", ""]
+        lines += [f"- {x}" for x in c]
+        lines.append("")
+
+    if risky:
+        lines += ["> A file in flight does not parse. The instance on the far side of this gap",
+                  "> cannot tell a mid-thought from a shipped mistake. Resolve it now.", ""]
+
+    text = "\n".join(lines)
+    print(text)
+    if args.write:
+        OUT.write_text(text, encoding="utf-8")
+        print(f"(written to {OUT})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

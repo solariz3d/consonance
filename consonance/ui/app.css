@@ -1,0 +1,626 @@
+:root {
+  --bg: #0B0E14; --panel: #141A28; --panel2: #1B2335; --line: #27304A;
+  --text: #E6EAF2; --muted: #8893AD; --aqua: #5EEAD4; --aqua-d: #2BB7A3; --amber: #F2B880;
+  /* the two golds of the loop aura — see .chain-hold-* below for why they are this far apart */
+  --gold-live: #FFC24A; --gold-chill: #9C8A52;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif; font-size: 14px;
+  user-select: none; -webkit-font-smoothing: antialiased;
+}
+body { display: flex; flex-direction: column; padding: 10px 14px; gap: 10px; }
+
+/* one top bar: mark + tabs + global actions (the hero identity lives in the intro + About) */
+#topbar { display: flex; align-items: stretch; gap: 12px; border-bottom: 1px solid var(--line); position: relative; }
+.brandmini {
+  display: flex; align-items: center; gap: 8px; padding: 0 6px 0 2px;
+  color: var(--muted); font-size: 13px; letter-spacing: 1.5px;
+}
+.brandmini svg { filter: drop-shadow(0 0 5px rgba(94,234,212,.25)); }
+
+.tabs { display: flex; gap: 2px; align-items: stretch; }
+.tabs button {
+  background: none; border: none; color: var(--muted); padding: 9px 16px; font-size: 13px;
+  cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .15s;
+}
+.tabs button:hover { color: var(--text); }
+.tabs button.active { color: var(--aqua); border-bottom-color: var(--aqua); }
+
+/* ── THE LOOP AURA — where the committee loop is, at the TOP of the window ───────────────────
+   AMENDMENT 2 (4e0de97) is quoted in a registration in this line of record and is not restated
+   here. What this block owes it is one thing: WORKING and COMPLETE must be tellable apart FROM
+   ACROSS THE ROOM, which is the keeper's own test and not a metaphor. They are separated on three
+   independent channels, so losing any one of them still leaves two:
+
+     SHAPE       working GLOWS with no fill; complete is a filled, settled block with no glow.
+                 Shape survives distance better than hue does, so it carries the most weight here
+     MOTION      working BREATHES; complete is dead still. Motion is the channel that survives
+                 peripheral vision best, which is most of what "across the room" means
+     BRIGHTNESS  radiant #FFC24A against chill #9C8A52 — relative luminance .603 vs .259, a
+                 contrast ratio of 2.12:1 between them, and 5.6:1 for the chill one against the
+                 page. Computed, not eyeballed; both are legible, and neither is the other
+
+   Hue is deliberately NOT one of the three: they are both gold because the keeper asked for two
+   golds, so the separation had to come from somewhere else. The reduced-motion block below drops
+   the middle channel on purpose for anyone who needs that; shape and brightness still carry it,
+   which is why there are three and not one. */
+.tabs button.chain-hold-working {
+  color: var(--gold-live); border-bottom-color: var(--gold-live);
+  text-shadow: 0 0 12px rgba(255, 194, 74, .55);
+  animation: chain-breathe 2.4s ease-in-out infinite;
+}
+.tabs button.chain-hold-waiting {
+  color: var(--amber); border-bottom-color: var(--amber); font-weight: 600;
+  text-shadow: 0 0 12px rgba(242, 184, 128, .6);
+  animation: chain-breathe .9s ease-in-out infinite;   /* the same aura, impatient */
+}
+.tabs button.chain-hold-complete {
+  color: var(--gold-chill); border-bottom-color: var(--gold-chill);
+  background: rgba(156, 138, 82, .2); border-radius: 6px 6px 0 0;   /* settled, filled, still */
+}
+.tabs button.chain-hold-unknown {
+  color: var(--muted); border-bottom: 2px dashed rgba(136, 147, 173, .5); opacity: .75;
+}
+@keyframes chain-breathe {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .62; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tabs button.chain-hold-working, .tabs button.chain-hold-waiting { animation: none; }
+}
+
+/* THE LOOP INDICATOR (amendment 4). The logo IS the loop — its three dots read clockwise from the
+   top are the cycle's own order, which the tab bar's order never was. chain-indicator.js paints the
+   dots; everything here is placement. The `.tabs button.chain-hold-*` rules above are now UNUSED —
+   renderTabs stops applying them, because one indicator is the point — and are left in place rather
+   than deleted, since this lap does not own the question of what else may want them. */
+.chainlogo { display: flex; align-items: center; padding: 0 14px; margin-bottom: -1px; }
+.chainlogo svg { overflow: visible; }
+
+#chainarrow {
+  display: flex; align-items: center; padding: 0 3px; margin-bottom: -1px;
+  color: var(--gold-live); font-size: 15px; line-height: 1;
+  text-shadow: 0 0 10px rgba(255, 194, 74, .5);
+  animation: chain-breathe 2.4s ease-in-out infinite;
+}
+#chainarrow[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { #chainarrow { animation: none; } }
+
+.topctl { display: flex; align-items: center; gap: 8px; margin-left: auto; padding-bottom: 5px; }
+.topctl .btn { padding: 5px 13px; font-size: 12px; }
+.topctl .btn.gear { padding: 5px 10px; }
+.spawnwrap { display: flex; }
+.spawnwrap #termadd { border-radius: 9px 0 0 9px; }
+.spawnwrap .split { border-radius: 0 9px 9px 0; border-left: 1px solid rgba(7,18,15,.35); padding: 5px 8px; }
+
+/* popovers — demoted per-session controls, one click from the top bar */
+.popover {
+  display: none; position: absolute; top: 42px; right: 14px; z-index: 60;
+  flex-direction: column; gap: 10px; min-width: 380px; padding: 14px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 11px;
+  box-shadow: 0 14px 36px rgba(0,0,0,.55);
+}
+.popover.show { display: flex; }
+.poprow { display: flex; gap: 8px; }
+.poprow .btn { flex: 1; }
+.gpsec { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.gpsec .gplabel { color: var(--aqua); font-family: "Consolas", monospace; min-width: 40px; }
+.gpsec .btn { padding: 5px 12px; font-size: 12px; }
+.gpsec input { width: 52px; background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 5px; padding: 3px 6px; font: inherit; font-size: 12px; outline: none; }
+.gpsec .brk { color: var(--muted); }
+
+main { flex: 1; min-height: 0; }
+.tab { display: none; height: 100%; }
+.tab.active { display: flex; flex-direction: column; }
+
+label { display: block; color: var(--muted); font-size: 12px; margin: 0 0 6px; letter-spacing: .3px; }
+input {
+  width: 100%; background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  padding: 11px 13px; border-radius: 9px; font-size: 14px; outline: none; transition: border-color .15s;
+  font-family: inherit;
+}
+input:focus { border-color: var(--aqua-d); }
+input::placeholder { color: #55607a; }
+.field { margin-bottom: 16px; }
+.row { display: flex; gap: 12px; align-items: flex-end; }
+.row .field { flex: 1; margin-bottom: 0; }
+
+.btn {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  padding: 11px 18px; border-radius: 9px; cursor: pointer; font-size: 13px;
+  transition: background .15s, transform .05s; font-family: inherit; white-space: nowrap;
+}
+.btn:hover { background: var(--line); }
+.btn:active { transform: translateY(1px); }
+.btn.accent { background: var(--aqua); color: #07120F; border: none; font-weight: 600; }
+.btn.accent:hover { background: var(--aqua-d); }
+.btn.sibling { background: var(--panel2); border: 1px solid var(--amber); color: var(--amber); }
+.btn.sibling:hover { background: var(--line); }
+.btn.sibling:disabled { color: var(--muted); border-color: var(--line); cursor: default; }
+
+.inst { display: flex; gap: 14px; flex: 1; min-height: 0; }
+#list {
+  flex: 1; list-style: none; margin: 0; padding: 6px; overflow: auto;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 11px;
+}
+#list li {
+  display: flex; align-items: center; gap: 11px; padding: 11px 13px; cursor: pointer; border-radius: 8px;
+}
+#list li:hover { background: rgba(94,234,212,.05); }
+#list li.sel { background: rgba(94,234,212,.11); }
+#list li .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: none; }
+#list li .dot.me { background: var(--amber); box-shadow: 0 0 9px var(--amber); }
+#list li .nm { min-width: 110px; font-weight: 500; }
+#list li .nm em { color: var(--amber); font-style: normal; font-weight: 400; font-size: 12px; }
+#list li .pth { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#list li.empty { color: var(--muted); justify-content: center; cursor: default; padding: 22px; }
+.sidebtns { display: flex; flex-direction: column; gap: 9px; width: 132px; }
+
+.settingsnote { color: var(--muted); font-size: 12px; align-self: center; }
+.addrow { display: flex; gap: 10px; margin-top: 12px; }
+.addrow input { flex: 1; }
+
+/* living loop */
+#loop { gap: 0; }
+.loophead { color: var(--muted); line-height: 1.6; margin: 0 0 14px; font-size: 13px; }
+.loophead b { color: var(--text); font-weight: 600; }
+.loophead .g { color: var(--aqua); }
+.loophead .r { color: var(--amber); }
+.loophead em { color: var(--text); font-style: normal; }
+.looprow { display: flex; gap: 12px; align-items: stretch; margin-bottom: 14px; }
+.looprow textarea {
+  flex: 1; background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  padding: 11px 13px; border-radius: 9px; font: inherit; resize: none; outline: none;
+}
+.looprow textarea:focus { border-color: var(--aqua-d); }
+.looprow .btn { align-self: stretch; }
+.loopcards { display: flex; gap: 12px; flex: 1; min-height: 0; }
+.lcard {
+  flex: 1; display: flex; flex-direction: column; min-width: 0;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 11px; overflow: hidden;
+}
+.lcard.ground { border-top: 2px solid var(--aqua); }
+.lcard.reach { border-top: 2px solid var(--amber); }
+.lcard h3 {
+  margin: 0; padding: 11px 14px; font-size: 11px; letter-spacing: 2px; color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+.lcard.ground h3 { color: var(--aqua); }
+.lcard.reach h3 { color: var(--amber); }
+.lcard .out {
+  padding: 13px 14px; overflow: auto; white-space: pre-wrap; line-height: 1.55; font-size: 13px;
+}
+.lcard .out.muted { color: var(--muted); }
+.lcard .out.thinking { color: var(--aqua); }
+
+/* committee (Stage 6) */
+#committee { gap: 0; }
+.loophead .s { color: var(--amber); }
+#cmtout { flex: 1; min-height: 0; overflow: auto; }
+.cmtwait { color: var(--muted); padding: 16px 4px; font-style: italic; }
+.forming { display: flex; flex-direction: column; gap: 12px; }
+.fsec { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.fhead { padding: 7px 12px; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; border-bottom: 1px solid var(--line); }
+.fhead.confirmed { color: var(--aqua); }
+.fhead.forks { color: var(--amber); }
+.fhead.novel { color: var(--text); }
+.fitem { padding: 8px 12px; line-height: 1.5; border-bottom: 1px solid rgba(39,48,74,.4); }
+.fitem:last-child { border-bottom: none; }
+.fitem.muted { color: var(--muted); }
+.ffrom { color: var(--muted); font-size: 11px; font-family: "Consolas", monospace; }
+.fpos { padding: 3px 0 0 12px; color: var(--text); }
+.cmtraw { margin-top: 12px; }
+.cmtraw summary { color: var(--muted); cursor: pointer; font-size: 12px; padding: 6px 0; }
+.cmtans { display: flex; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.cmtv { color: var(--aqua); font-family: "Consolas", monospace; font-size: 11px; min-width: 64px; text-transform: uppercase; }
+.cmtatext { flex: 1; white-space: pre-wrap; line-height: 1.5; font-size: 13px; color: var(--muted); }
+
+/* live committee — focus pane + convene bar + synthesis panel */
+.btn.convene { background: var(--panel2); border: 1px solid var(--aqua-d); color: var(--aqua); }
+.btn.convene:hover { background: var(--line); }
+.btn.convene:disabled { color: var(--muted); border-color: var(--line); cursor: default; }
+.pane .phead .pfocus { cursor: pointer; color: var(--muted); padding: 0 2px; }
+.pane .phead .pfocus:hover { color: var(--aqua); }
+.pane.convening { border-color: var(--aqua-d); box-shadow: 0 0 14px rgba(94,234,212,.18); }
+/* focus declared after convening: the amber outline must win when both classes are present */
+.pane.focus { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber), 0 0 16px rgba(242,184,128,.18); }
+.pane.focus .phead .pfocus { color: var(--amber); }
+/* drop target, declared last: while a file is over a pane, that pane is the answer to
+   "where is this going" — it outranks both convening and focus for the moment it lasts */
+.pane.dragover { border-color: var(--aqua); box-shadow: 0 0 0 1px var(--aqua), 0 0 20px rgba(94,234,212,.28); }
+#convbar { display: none; gap: 10px; align-items: stretch; margin-bottom: 12px; }
+#convbar.show { display: flex; }
+#convbar textarea {
+  flex: 1; background: var(--panel2); border: 1px solid var(--aqua-d); color: var(--text);
+  padding: 10px 12px; border-radius: 9px; font: inherit; resize: none; outline: none;
+}
+.convbtns { display: flex; flex-direction: column; gap: 8px; }
+/* drawer, not band: floats over the panes so opening it never resizes a terminal */
+#cmtpanel {
+  display: none; flex-direction: column; max-height: 42%; flex: none;
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 31;
+  border: 1px solid var(--amber); border-radius: 10px; background: var(--panel2); overflow: hidden;
+  box-shadow: 0 -10px 28px rgba(0,0,0,.5);
+}
+#cmtpanel.show { display: flex; }
+.cmthead {
+  display: flex; justify-content: space-between; align-items: center; padding: 7px 12px;
+  border-bottom: 1px solid var(--line); font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--amber);
+}
+.cmthead b { color: var(--text); }
+#spreadline { font-family: "Consolas", monospace; font-size: 10px; color: var(--aqua); text-transform: none; letter-spacing: 0; padding-left: 14px; }
+#deltaline { font-family: "Consolas", monospace; font-size: 10px; color: var(--amber); text-transform: none; letter-spacing: 0; margin-right: auto; padding-left: 14px; }
+.cmthctl { display: flex; align-items: center; gap: 10px; }
+.cmtx { cursor: pointer; color: var(--muted); }
+.cmtx:hover { color: var(--amber); }
+#cmtbody { overflow: auto; padding: 10px 12px; }
+
+/* gate cards (Stage 7) — the chair Approves/Denies a surfaced pull.
+   Floating corner stack: urgency doesn't require layout shift — a card arriving
+   must never reflow the pane grid mid-read. */
+.gatecards {
+  display: flex; flex-direction: column; gap: 8px;
+  position: absolute; top: 8px; right: 8px; width: min(440px, 55%); z-index: 40;
+}
+.gatecards:empty { display: none; }
+/* KEYED BY CLASS SINCE 2026-09-06, for exactly the reason stated forty lines below about
+   #main/#mainpane: an ID rule cannot be inherited by a second container, and a second container is
+   what P-LIB-CHANNEL piece 3 needs — a card belongs in the tab of the seat it is FOR (the keeper,
+   04:32: "you'd think it would appear in the orch tab"). The seat tabs need the positioning anchor
+   #terminal already has, or an absolutely-positioned stack escapes to the viewport. */
+.tab.seat { position: relative; }
+/* A tab holding an undecided pull. Deliberately quiet, and it marks that a DECISION IS WAITING —
+   not where the loop is standing. That second render was retired (loop_indicator_design_2026-09-02,
+   amendments 2-3); this one is anchored to the tab that holds the thing, so there is no direction
+   to misread. */
+.tabs button.gcpending { color: var(--amber); }
+.tabs button.gcpending::after {
+  content: "\25CF"; font-size: 8px; vertical-align: super; margin-left: 4px; color: var(--amber);
+}
+.gatecard {
+  display: flex; align-items: center; gap: 12px; justify-content: space-between;
+  background: var(--panel2); border: 1px solid var(--amber); border-left: 3px solid var(--amber);
+  border-radius: 9px; padding: 9px 12px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.5);
+}
+.gcbody { flex: 1; min-width: 0; font-size: 13px; }
+.gckind { color: var(--amber); text-transform: uppercase; font-size: 10px; letter-spacing: 1px; }
+.gcint { color: var(--muted); font-family: "Consolas", monospace; font-size: 11px; }
+.gcwhy { color: var(--text); margin-top: 3px; line-height: 1.45; }
+.gcbtns { display: flex; gap: 8px; flex: none; }
+.gcapprove, .gcdeny { border: none; border-radius: 7px; padding: 7px 14px; cursor: pointer; font-size: 12px; font-family: inherit; }
+.gcapprove { background: var(--aqua); color: #07120F; font-weight: 600; }
+.gcapprove:hover { background: var(--aqua-d); }
+.gcdeny { background: var(--panel); color: var(--muted); border: 1px solid var(--line); }
+.gcdeny:hover { color: var(--amber); border-color: var(--amber); }
+/* gate/dyad state chips — always-visible status in the bottom bar; controls live in ⚙ */
+#gatechip { color: var(--muted); font-family: "Consolas", monospace; font-size: 11px; white-space: nowrap; }
+#gatechip #gatemode { color: var(--aqua); }
+#dyadstate { color: var(--muted); font-family: "Consolas", monospace; font-size: 11px; white-space: nowrap; }
+#dyadstate:empty { display: none; }
+#breakerstate { font-family: "Consolas", monospace; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+#breakerstate:empty { display: none; }
+.brk-tripped { color: var(--amber); font-weight: 600; }
+
+/* the Main tab (Stage 10) — the housed primary instance */
+/* A HOUSED SEAT -- a persistent instance living in its own tab (the Orchestrator, the
+   Librarian). Keyed by CLASS on purpose since 2026-08-22: these three rules used to be #main
+   and #mainpane, so when the Librarian tab landed its pane inherited none of them and stopped
+   short of the window bottom. The header rendered fine because .mainbar/.mainhead were already
+   classes -- the parts that were classes worked and the parts that were IDs did not. Fixed as
+   classes rather than by adding a duplicate #librarianpane line, which would leave the same
+   trap set for a third seat. librarian-wiring.test.js asserts every seat carries them. */
+.seat { gap: 0; }
+.mainbar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+/* ONE LINE, and the rest in the `title` (amendment 4, the keeper: "too bulky and takes up too much
+   space"). Nothing was deleted — every sentence moved into the tooltip — and the ellipsis is load
+   bearing for the same reason the chip's is: a header that silently truncates and a header that is
+   short are two different facts, and they must not make the same pixels. */
+.mainhead {
+  color: var(--muted); font-size: 13px; line-height: 1.5; flex: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.mainhead b { color: var(--amber); font-weight: 600; }
+/* A tooltip nobody knows is there is a deletion wearing a shrink's clothes. */
+.headmore { color: var(--aqua-d); font-style: normal; font-size: 11px; opacity: .8; }
+.headmore::before { content: "▾ "; }
+.seatpane { flex: 1; min-height: 0; display: flex; }
+.seatpane .pane { flex: 1; min-height: 0; }
+
+/* embedded terminal workspace (multi-pane) */
+#terminal { gap: 0; position: relative; }  /* anchor for gate cards + committee drawer */
+/* 660px floor = ~105 xterm columns per pane at 14px Cascadia: two wide readable
+   columns beat four at ~60 cols — the CLI assumes 80+, and wrapped prose at 60 is
+   the worst reading surface the app can produce. */
+/* ROW FLOOR = 460px, RAISED FROM 240px ON 2026-08-11. The columns already had a floor; the ROWS
+   did not have a usable one, and `minmax(240px, 1fr)` means rows SHARE the container height — so
+   every pane added divides all of them down toward 240px. At nine panes (a fan-out plus four
+   fresh subjects) every pane sat on the floor at once and the whole workspace became unreadable
+   slices. The keeper's words: "they are all squished."
+
+   460px is roughly 24 terminal rows at 14px Cascadia plus the pane header — the size a terminal
+   has assumed since VT100, and the point below which a CLI's own output starts scrolling out from
+   under you while you read it.
+
+   `minmax(460px, 1fr)` and NOT a flat `460px`: with one pane the 1fr still lets it fill the whole
+   workspace, so a single-pane session loses nothing. With many, the floor wins, the tracks
+   overflow, and `overflow: auto` above turns that into vertical scrolling — panes stay full size
+   and you scroll the workspace to reach the rest, instead of every pane shrinking to fit. */
+#panes {
+  flex: 1; min-height: 0; overflow: auto; display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(660px, 1fr)); grid-auto-rows: minmax(460px, 1fr);
+}
+.panesempty {
+  display: none; grid-column: 1 / -1;
+  flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  color: var(--muted); user-select: none;
+}
+#panes .panesempty:only-child { display: flex; }
+.panesempty .petitle { font-size: 11px; letter-spacing: 2.5px; text-transform: uppercase; }
+.panesempty .pesub { font-size: 12px; color: #55607a; }
+/* Matches the grid row floor above. If these two disagree the pane can be squeezed inside a track
+   that is tall enough for it, which is the same unreadable result arriving by a different route. */
+.pane {
+  display: flex; flex-direction: column; min-width: 0; min-height: 460px;
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #0B0E14;
+}
+.pane.dead { opacity: 0.5; }
+.pane .phead {
+  display: flex; align-items: center; gap: 8px; padding: 5px 11px;
+  border-bottom: 1px solid var(--line); font-size: 11px; color: var(--muted);
+}
+/* verbs appear under the cursor; state (letter, cwd, role, gauges) stays put */
+.pane .phead .pfocus, .pane .phead .pcopy, .pane .phead .ppaste,
+.pane .phead .pclose, .pane .phead .preopen { opacity: 0; transition: opacity .12s; }
+.pane:hover .phead .pfocus, .pane:hover .phead .pcopy, .pane:hover .phead .ppaste,
+.pane:hover .phead .pclose, .pane:hover .phead .preopen { opacity: 1; }
+.pane.focus .phead .pfocus, .pane.dead .phead .preopen { opacity: 1; }
+.pane .phead .pname {
+  background: var(--aqua); color: #07120F; font-weight: 700; font-size: 11px;
+  min-width: 18px; height: 18px; line-height: 18px; text-align: center; padding: 0 4px; border-radius: 5px; flex: none;
+}
+.pane .phead .pid { color: var(--aqua); font-family: monospace; }
+.pane .phead .pcwd { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane .phead .prole {
+  cursor: pointer; font-size: 9px; letter-spacing: .5px; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); flex: none;
+}
+.pane .phead .prole:hover { border-color: var(--amber); }
+.pane .phead .prole.committee { color: var(--amber); border-color: var(--amber); }
+.pane .phead .ptether { font-family: "Consolas", monospace; font-size: 10px; color: var(--muted); }
+.pane .phead .pctx { font-family: "Consolas", monospace; font-size: 10px; color: var(--aqua); }
+.pane .phead .pctx.warn { color: var(--amber); }
+.pane .phead .pcopy { cursor: pointer; padding: 0 4px; color: var(--aqua); }
+.pane .phead .pcopy:hover { color: var(--text); }
+.pane .phead .ppaste { cursor: pointer; padding: 0 4px; }
+.pane .phead .ppaste:hover { color: var(--aqua); }
+.pane .phead .pclose { cursor: pointer; padding: 0 4px; }
+.pane .phead .pclose:hover { color: var(--amber); }
+.pane .phead .preopen { cursor: pointer; padding: 0 4px; color: var(--aqua); }
+.pane .phead .preopen:hover { color: var(--text); }
+.pane .pterm { flex: 1; min-height: 0; padding: 4px 6px; }
+/* padding-right on .xterm is the one lever FitAddon respects — it subtracts it from the width
+   and recomputes columns, so the text itself gets narrower and clears the overlay scrollbar. */
+.pane .pterm .xterm { height: 100%; padding-right: 12px; box-sizing: border-box; }
+
+/* Thin themed scrollbars via the STANDARD properties. The ::-webkit-scrollbar pseudo-elements
+   don't render in this WebView2 (its Fluent scrollbars ignore them) AND defining them suppresses
+   the standard path too — which is why the bar vanished entirely. scrollbar-color is what
+   Edge/WebView2 actually honors: a visible thumb over a visible track. */
+* { scrollbar-width: thin; scrollbar-color: var(--muted) var(--panel); }
+.xterm-viewport { scrollbar-gutter: stable; }
+
+/* the tap — collapsed to one bar; the log opens as an overlay drawer that never
+   resizes a terminal (inline expand would force N ConPTY refits per peek) */
+#stream { flex: none; position: relative; }
+#streambar {
+  height: 28px; display: flex; align-items: center; gap: 12px; padding: 0 12px;
+  background: var(--panel2); border-top: 1px solid var(--line); border-radius: 0;
+  font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted);
+  cursor: pointer; user-select: none;
+}
+#tappanes { display: flex; gap: 5px; font-family: "Consolas", monospace; font-size: 11px; letter-spacing: 0; }
+#tappanes:empty { display: none; }
+#tappanes .tp { color: var(--line); transition: color 2.5s ease, text-shadow 2.5s ease; }
+#tappanes .tp.lit { color: var(--aqua); text-shadow: 0 0 7px rgba(94,234,212,.55); transition: none; }
+#tapticker {
+  flex: 1; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: "Consolas", monospace; font-size: 11px;
+  text-transform: none; letter-spacing: 0; color: var(--text);
+}
+#tapticker .pid { color: var(--aqua); }
+#tapticker .role-user { color: var(--amber); }
+#tapticker .kept { color: var(--aqua); }
+#tapcount { color: var(--amber); font-family: "Consolas", monospace; font-size: 11px; letter-spacing: 0; }
+#tapcount:empty { display: none; }
+#tapchev { color: var(--muted); transition: transform .15s; }
+#stream.open #tapchev { transform: rotate(180deg); }
+.statuscluster {
+  display: flex; align-items: center; gap: 14px; cursor: default;
+  text-transform: none; letter-spacing: .3px; font-size: 12px;
+}
+.statuscluster #status { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── THE STREAM BAR MUST NEVER WIDEN THE DOCUMENT ────────────────────────────────────────────
+   Keeper, 2026-09-02: the bottom bar "sometimes appears taking up unneeded space". It is a
+   HORIZONTAL SCROLLBAR, and it is the DOCUMENT's, not the bar's:
+
+     #streambar is display:flex with no overflow rule, so it is `visible`, and a visible overflow
+     draws no scrollbar of its own — it enlarges the scrollable area of the VIEWPORT instead.
+     html,body are height:100%, so that scrollbar eats ~15px off the bottom of a full-height
+     layout; `main { flex: 1 }` absorbs the loss and the terminals get shorter. Intermittent
+     because it depends on content width.
+
+   WHY THE ROW CANNOT SHRINK TODAY: a flex item's automatic minimum size is its min-content
+   width, and every chip in .statuscluster is `white-space: nowrap` with visible overflow, so
+   each one refuses to give up a single pixel. #tapticker is the only guarded item on the row.
+   The cluster as a whole is also min-width:auto, so it cannot shrink even where its children
+   could. At the 840px default window the cluster's own min-content already exceeds the row.
+
+   THE FIX IS A DEGRADATION ORDER, NOT A CLIP. Nothing is dropped and nothing vanishes: the
+   least load-bearing readouts yield first, every one of them ellipsizes, and the `…` IS the
+   signal that there is more. A chip that silently disappeared would be the same defect class as
+   the placeholder fixed earlier tonight — two states, one appearance.
+
+     floor  #tapticker    a ticker of completed turns, and the only guarded item on the row. It
+                          is flex:1, so its flex-basis is 0 and flex-shrink cannot reach it — under
+                          overflow it simply sits on its min-width. LOWERING THAT FLOOR from 120px
+                          to 60px is what frees its space, not a shrink weight; a shrink factor
+                          here would have been decoration that read like a fix
+        50  #status       already ellipsized, and it had no min-width:0, so its automatic minimum
+                          was its content and it never actually gave anything back
+        20  #chainchip    yields THIRD and keeps a 7ch stub, because after tonight the tab aura
+                          at the TOP is the primary display for holder and next hop — this row is
+                          the detail line, so it is the right thing to compress and the wrong
+                          thing to remove
+         1  #cost, #hud   last resort, and the honest cost of it is in the hand-back: neither
+                          carries a title attribute, so a truncated value is not recoverable on
+                          hover until the window is widened
+         0  everything else — the gate chip, the auto checkbox, the summarize BUTTON and the
+            chevron never shrink. The controls are at the RIGHT end, which is where a clip would
+            land, so they are the one group that must not be in the shrink chain at all.
+
+   The `overflow: hidden` below is a BACKSTOP and should be unreachable: the chain above gives
+   back ~700px, and the window's own minWidth is 700. It exists so that an unforeseen chip can
+   never reintroduce the scrollbar. Its one cost is that the lit-pane glow (a 7px text-shadow in
+   a 28px row) may clip by a pixel or two at the very top and bottom. */
+#streambar { overflow: hidden; }
+#tapticker { min-width: 60px; }
+.statuscluster { min-width: 0; }
+.statuscluster #status { min-width: 0; flex-shrink: 50; }
+.statuscluster #chainchip {
+  min-width: 7ch; flex-shrink: 20; overflow: hidden; text-overflow: ellipsis;
+}
+.statuscluster #cost, .statuscluster #hud {
+  min-width: 0; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis;
+}
+.statuscluster #gatechip, .statuscluster #dyadstate, .statuscluster #breakerstate,
+.statuscluster .autolbl, .statuscluster .distillbtn,
+#tappanes, #tapcount, #tapchev { flex-shrink: 0; }
+
+/* the chain chip — where the loop is, and who the next hop waits on.
+   TWO SALIENCES, ONE ELEMENT. Quiet is the default and is deliberately low-contrast: it is the
+   liveness proof (an indicator invisible until it fires cannot be told from a dead one), not the
+   alarm. `waiting` is the exception state at the registered 15 minutes, and it is the only one that
+   raises contrast. The three degraded states share the muted treatment because none of them may
+   read as a position — a stale value shown as a live one is the failure this chip exists to avoid.
+   No pulse or animation: a moving thing in permanent chrome is furniture within a day, which is the
+   ferry line's 233 in CSS form. */
+#chainchip {
+  font-family: "Consolas", monospace; font-size: 11px; white-space: nowrap;
+  letter-spacing: 0; cursor: default;
+}
+#chainchip.chain-quiet { color: var(--muted); }
+#chainchip.chain-waiting { color: var(--amber); font-weight: 600; }
+/* `unconfirmed` is a REAL reading that cannot be confirmed, not an absent one: the control plane
+   wrote the delivery and could not verify it landed. It sits between the two groups deliberately —
+   more present than the degraded states, never as settled as a receipt. */
+#chainchip.chain-unconfirmed { color: var(--muted); font-style: italic; }
+/* `idle` is the ledger saying every lap is filed. That is BOOT, not a failure, so it is not painted
+   with the can't-read states even though it also draws no arrow. */
+#chainchip.chain-complete { color: var(--gold-chill); }
+#chainchip.chain-idle,
+#chainchip.chain-unknown,
+#chainchip.chain-unavailable,
+#chainchip.chain-blind { color: var(--line); }
+#streambody {
+  display: none; position: absolute; left: 0; right: 0; bottom: 36px; height: 42vh;
+  flex-direction: column; overflow: hidden; z-index: 30;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 -10px 28px rgba(0,0,0,.5);
+}
+#stream.open #streambody { display: flex; }
+.distillbtn {
+  background: var(--panel); border: 1px solid var(--line); color: var(--aqua);
+  font-size: 10px; letter-spacing: 1px; text-transform: uppercase; padding: 4px 10px;
+  border-radius: 6px; cursor: pointer;
+}
+.distillbtn:hover { border-color: var(--aqua-d); }
+.distillbtn:disabled { color: var(--muted); cursor: default; }
+.streamctl { display: flex; align-items: center; gap: 12px; }
+.autolbl { display: flex; align-items: center; gap: 5px; cursor: pointer; text-transform: none; letter-spacing: 0; }
+.autolbl input { accent-color: var(--aqua); cursor: pointer; margin: 0; }
+#streamlog .resonance { margin: 6px 0; padding: 6px 0; border-top: 1px dashed var(--line); }
+#streamlog .rdiv { color: var(--aqua); font-size: 11px; letter-spacing: 1px; margin: 2px 0 6px; }
+#streamlog .ratom { white-space: normal; margin: 3px 0; padding-left: 8px; }
+#streamlog .rkind { color: var(--amber); text-transform: uppercase; font-size: 10px; }
+#streamlog .rtether { color: var(--muted); }
+#streamlog { flex: 1; overflow: auto; padding: 6px 12px; font-family: "Consolas", monospace; font-size: 12px; line-height: 1.55; }
+#streamlog .row { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#streamlog .pid { color: var(--aqua); }
+#streamlog .role-user { color: var(--amber); }
+#streamlog .role-assistant { color: var(--text); }
+
+/* About tab — scrollable, left-aligned, dense reference. Hero stays centered at top. */
+#about { align-items: stretch; justify-content: flex-start; padding: 0; }
+.aboutscroll {
+  width: 100%; height: 100%; overflow-y: auto;
+  padding: 24px 36px 32px;
+  user-select: text; -webkit-user-select: text;
+}
+.aboutscroll::-webkit-scrollbar { width: 10px; }
+.aboutscroll::-webkit-scrollbar-track { background: transparent; }
+.aboutscroll::-webkit-scrollbar-thumb { background: var(--panel2); border-radius: 6px; }
+.aboutscroll::-webkit-scrollbar-thumb:hover { background: var(--line); }
+.abouthero {
+  text-align: center; padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 24px;
+}
+.abouthero svg { filter: drop-shadow(0 0 14px rgba(94,234,212,.30)); }
+.abouthero h1 { margin: 6px 0 4px; font-weight: 300; font-size: 28px; letter-spacing: .5px; }
+.abouthero .tagline { color: var(--muted); font-style: italic; margin: 0; font-size: 13px; letter-spacing: .3px; }
+.aboutbody { max-width: 720px; margin: 0 auto; }
+.aboutbody > section { margin: 0 0 28px; }
+.aboutbody h2 {
+  color: var(--aqua); font-weight: 500; font-size: 11px;
+  letter-spacing: 2px; text-transform: uppercase;
+  margin: 0 0 12px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.aboutbody p { line-height: 1.65; margin: 0 0 10px; color: var(--text); }
+.aboutbody ol, .aboutbody ul { line-height: 1.65; padding-left: 22px; margin: 0 0 10px; }
+.aboutbody li { margin-bottom: 8px; color: var(--text); }
+.aboutbody b { color: var(--text); font-weight: 600; }
+.aboutbody i { color: var(--muted); font-style: italic; }
+.aboutbody code {
+  background: var(--panel2); color: var(--aqua);
+  padding: 1px 6px; border-radius: 3px;
+  font-family: Consolas, "Courier New", monospace; font-size: 12px;
+}
+/* D142: a README link, rendered as its words (the app has no opener — an href would navigate the window away); the
+   address is in its hover title, and the dotted line says there is one. */
+.aboutbody .aboutlink { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
+dl.glossary { line-height: 1.55; margin: 0; }
+dl.glossary dt {
+  color: var(--aqua); font-weight: 500;
+  margin: 14px 0 2px; font-size: 13.5px;
+}
+dl.glossary dt:first-of-type { margin-top: 0; }
+dl.glossary dd { margin: 0 0 0 16px; color: var(--text); font-size: 13.5px; }
+
+#hud { font-family: "Consolas", monospace; font-size: 11px; color: var(--muted); white-space: nowrap; }
+#hud .warn { color: var(--amber); }
+#cost { font-family: "Consolas", monospace; font-size: 11px; color: var(--muted); white-space: nowrap; }
+#cost .usd { color: var(--aqua); }
+
+/* L059 · the setup window for the transfer (stick.js). Beneath the intro (9999), above everything else. */
+#stick-setup, #leave { position: fixed; inset: 0; z-index: 9000; background: #0B0E14; color: #d8dde6; overflow: auto; padding: 28px 36px; font-size: 13px; }
+/* P-LEAVE · the close window (leave.js): the same family, above the intro (9999) — a close can come at any moment. */
+#leave { z-index: 10000; }
+#stick-setup[hidden], #leave[hidden] { display: none; }
+#stick-setup h2, #leave h2 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+#stick-setup h3, #leave h3 { margin: 18px 0 6px; font-size: 14px; }
+#stick-setup code, #leave code { font-size: 12px; }
+.stick-table { border-collapse: collapse; margin: 12px 0; width: 100%; }
+.stick-table th, .stick-table td { border-bottom: 1px solid #222a36; padding: 6px 8px; text-align: left; vertical-align: top; }
+.stick-table th { color: #8b95a7; font-weight: 500; }
+.stick-why { color: #8b95a7; font-size: 12px; margin-top: 4px; max-width: 420px; }
+.stick-muted { color: #8b95a7; }
+.stick-unknown { color: #8b95a7; font-style: italic; }
+.stick-bad { color: #ff8a80; }
+.stick-warn { color: #ffd180; }
+.stick-actions { margin-top: 16px; display: flex; gap: 10px; }
+.stick-actions button { padding: 8px 14px; }

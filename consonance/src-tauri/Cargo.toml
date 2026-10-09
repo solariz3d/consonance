@@ -1,0 +1,58 @@
+[package]
+name = "consonance"
+version = "0.1.0"
+description = "Instances, in concert."
+authors = ["the keeper"]
+edition = "2021"
+default-run = "consonance"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.8"
+uuid = { version = "1", features = ["v4"] }
+sysinfo = "0.30"
+arboard = "3"
+clipboard-win = "5"
+rmcp = { version = "1.8", features = ["server", "macros", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time"] } # time: chair-verb reply timeout
+axum = "0.8"
+schemars = "1"
+vt100 = "0.15" # headless terminal emulator: render raw PTY bytes → clean lines for turn extraction
+# WASAPI process loopback for the cochlea tab. NOT a new download: windows 0.61.3 is already
+# compiled in the tree via Tauri, so this declares features on a crate that is already built.
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",   # SECURITY_ATTRIBUTES, required by CreateEventW
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",  # PROPVARIANT: the activation params travel as VT_BLOB
+  "Win32_System_Threading",
+  # P-LEAVE-3 ROW 4/5, on the same already-compiled crate: ShutdownBlockReasonCreate/Destroy (Shutdown), the
+  # keep-awake hold SetThreadExecutionState (Power), and SetWindowSubclass for the session-end watch (UI_Shell).
+  "Win32_System_Shutdown",
+  "Win32_System_Power",
+  "Win32_UI_Shell",   # SetWindowSubclass: the block must sit on the app's own VISIBLE window (docs, ROW 4)
+  # CreateMutexW for the single-instance guard, and MessageBoxW so a refused second launch SAYS
+  # so instead of just not appearing. Same reasoning as the block above: features on a crate
+  # already compiled in the tree, nothing new to download. An app that silently declines to
+  # start would be the very failure class this guard exists to close.
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Media_Audio",
+  # WinRT, not Win32: GlobalSystemMediaTransportControlsSessionManager, the same session API the OS
+  # uses to draw its own volume-key overlay. A feature flag on a crate already in the tree via
+  # Tauri, so no new dependency and nothing to download.
+  "Media_Control",
+  "Foundation",
+  "Win32_Media_KernelStreaming",
+] }
+# The #[implement] macro expands to windows_core:: paths, so the crate must be nameable.
+windows-core = "0.61"
+chrono = { version = "0.4", default-features = false, features = ["clock"] } # the pulse: local civil time for the witnessed interval
+
+[profile.dev]
+incremental = true
