@@ -22,7 +22,7 @@ const LIB = 'mcp__consonance__call_librarian', CHAIR = 'mcp__consonance__call_ch
 const OR_TOKEN = ['sk', 'or', 'v1', 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4'].join('-');
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
-function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'sg-test-')); }
+function tmpDir() { return require('../tools/scratch.js').mkdtemp('sg-test-'); }
 const rows = (dir) => { try { return fs.readFileSync(path.join(dir, 'sources-gate.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch (_) { return []; } };
 
 // mock transcript entries
@@ -47,9 +47,14 @@ function payloadOf(dir, entries, { tool = LIB, text, cwd = 'C:/work', extra = {}
   const tp = entries ? writeTranscript(dir, entries) : null;
   return JSON.stringify({ session_id: 's1', transcript_path: tp, cwd, hook_event_name: 'PreToolUse', tool_name: tool, tool_input: { text }, tool_use_id: RING_ID, ...extra });
 }
+// D287 (finding 2, loop/landing_suite_d287_2026-10-10.md): every child runs with a temp home, so the real ~/.consonance.json (its gates_mode,
+// room_path, data_dir) never reaches a row; with light set there, four of these rows went red. STRICT_HOME holds no config, so the hook runs
+// strict; a row that tests light passes homeWith({ gates_mode: 'light' }).
+function homeWith(cfg) { const h = tmpDir(); if (cfg) fs.writeFileSync(path.join(h, '.consonance.json'), JSON.stringify(cfg)); return h; }
+const STRICT_HOME = homeWith(null);
 function envFor(dir, extra = {}) {
   const base = { ...process.env }; delete base.CONSONANCE_DREAM; delete base.CONSONANCE_SECOND_READER_RUN;
-  return { ...base, CONSONANCE_DATA: dir, CONSONANCE_PANE: 'A', ...extra };
+  return { ...base, CONSONANCE_DATA: dir, CONSONANCE_PANE: 'A', USERPROFILE: STRICT_HOME, HOME: STRICT_HOME, ...extra };
 }
 function runGate(dir, input, extra = {}) {
   const t0 = Date.now(), r = spawnSync(process.execPath, [HOOK], { input, env: envFor(dir, extra), encoding: 'utf8', timeout: 20000 });
@@ -374,6 +379,15 @@ test('LEDGER: a key shape in the pointer line or an item is redacted in the row'
   assert.ok(!raw.includes(OR_TOKEN), 'a key reached the ledger'); assert.ok(raw.includes('<redacted>'));
 });
 
+test('D418 LEDGER: in light, a key shape in an unmatched item is redacted in the warn row too', () => {
+  const dir = tmpDir(), light = homeWith({ gates_mode: 'light' }), text = 'pointer\nSOURCES: `echo ' + OR_TOKEN + '`';
+  const r = runGate(dir, payloadOf(dir, [USER('go')], { text }), { USERPROFILE: light, HOME: light });
+  assert.ok(!isDeny(r), 'light delivers');
+  const row = rows(dir).pop(); assert.strictEqual(row.decision, 'warn');
+  const raw = fs.readFileSync(path.join(dir, 'sources-gate.jsonl'), 'utf8');
+  assert.ok(!raw.includes(OR_TOKEN), 'a key reached the ledger through a warn row'); assert.ok(raw.includes('<redacted>'));
+});
+
 test('LEDGER: the secret shapes are the second reader worker\'s, byte for byte (drift guard)', () => {
   assert.deepStrictEqual(G.SECRET_SHAPES.map(String), W.SECRET_SHAPES.map(String));
 });
@@ -573,4 +587,95 @@ test('D273: gatesDocFrom resolves <repo>/consonance/GATES.md from room_path when
   assert.strictEqual(G.gatesDocFrom(path.join('C:', 'rooms', 'mine', 'CLAUDE.md'), () => true), G.GATES_REL + ' (in the Consonance repository)', 'a room outside a repo');
   assert.strictEqual(G.gatesDocFrom('', () => true), G.GATES_REL + ' (in the Consonance repository)');
   assert.strictEqual(G.gatesDocFrom(room, () => { throw new Error('EACCES'); }), G.GATES_REL + ' (in the Consonance repository)', 'an error checking the file falls back, never throws');
+});
+
+test('D287 LIGHT: with gates_mode light in the home, the hook allows a quoted cd-chain that ran (strict denies it), marks the row light, and still denies an item nothing touched', () => {
+  const dir = tmpDir(), light = homeWith({ gates_mode: 'light' });
+  const turn = [USER('go'), ...bashCall('t1', 'cd /c/Users/x/repo && git log --oneline -1 main')];
+  const chain = withSources('SOURCES: `cd /c/Users/x/repo && git log --oneline -1 main`');
+  assert.ok(isDeny(runGate(dir, payloadOf(dir, turn, { text: chain }))), 'strict (the pinned home) must deny the quoted chain, or this row tests nothing');
+  assert.strictEqual(rows(dir).pop().mode, undefined, 'a strict row carries no mode field');
+  const r = runGate(dir, payloadOf(dir, turn, { text: chain }), { USERPROFILE: light, HOME: light });
+  assert.strictEqual(r.out, null, JSON.stringify(r.out));
+  const row = rows(dir).pop(); assert.strictEqual(row.decision, 'allow'); assert.strictEqual(row.mode, 'light');
+  // AMENDED by name (D418 part 5, the keeper 2026-10-19 "just do what we need to do to make it work"): light no longer REFUSES an item nothing touched;
+  // it delivers the ring and records a 'warn' row naming the item. The check stays, the bounce goes. Strict still refuses (the row above).
+  const w = runGate(dir, payloadOf(dir, turn, { text: withSources('SOURCES: exo_memory/handback/never-opened.md') }), { USERPROFILE: light, HOME: light });
+  assert.ok(!isDeny(w), 'light must deliver, not refuse: ' + JSON.stringify(w.out));
+  const wr = rows(dir).pop(); assert.strictEqual(wr.decision, 'warn'); assert.strictEqual(wr.mode, 'light');
+  assert.deepStrictEqual(wr.unmatched, ['exo_memory/handback/never-opened.md'], 'the warn row names what was missing');
+});
+
+test('D418 part 5 WARN: in light, a ring with NO SOURCES line is delivered and logged as warn; in strict it is still refused', () => {
+  const dir = tmpDir(), light = homeWith({ gates_mode: 'light' });
+  const turn = [USER('go'), ...readCall('t1', 'C:/work/a.md')];
+  const bare = 'a hand-back with no sources line\nNEXT: librarian read it when it lands';
+  assert.ok(isDeny(runGate(dir, payloadOf(dir, turn, { text: bare }))), 'strict must still refuse a ring with no SOURCES line');
+  const r = runGate(dir, payloadOf(dir, turn, { text: bare }), { USERPROFILE: light, HOME: light });
+  assert.ok(!isDeny(r), 'light must deliver: ' + JSON.stringify(r.out));
+  const row = rows(dir).pop(); assert.strictEqual(row.decision, 'warn'); assert.strictEqual(row.kind, 'missing');
+});
+
+// ------------------------------------------------------------------ D288 F1: light matches what a command OPENED, not the command's text
+// (exo_memory/handback/p-hermetichooks-B_2026-10-10.md F1). In-process: decide() with the mode given, so these rows test the matcher, not the home.
+const callsOf = (...entries) => G.turnCalls([USER('go'), ...entries.flat()]);
+const decideIn = (mode, line, ...entries) => G.decide(withSources(line), callsOf(...entries), 'C:/work', 'L.jsonl', 'abc', 'ring', 'GATES.md', mode);
+
+test('D288 F1 TOO LOOSE: in light, a path that was only echoed, printed, ls\'d, stat\'d or in a comment is refused, as in strict', () => {
+  for (const cmd of ['echo C:/work/a.md', 'printf "%s" C:/work/a.md', 'ls -la C:/work/a.md', 'stat C:/work/a.md', '# C:/work/a.md\nls', 'Write-Host C:\\work\\a.md']) {
+    for (const mode of ['strict', 'light']) assert.strictEqual(decideIn(mode, 'SOURCES: C:/work/a.md', bashCall('t1', cmd)).decision, 'deny', `${mode} counted "${cmd}" as opening the path`);
+  }
+});
+
+test('D288 F1 TOO LOOSE: in light, a COMMAND item is matched only by a segment that ran it, never by an echo of its text', () => {
+  assert.strictEqual(decideIn('light', 'SOURCES: `git log -1 --format=%h`', bashCall('t1', 'git log -1 --format=%h')).decision, 'allow', 'the command that ran');
+  assert.strictEqual(decideIn('light', 'SOURCES: `git log -1 --format=%h`', bashCall('t1', 'echo "git log -1 --format=%h"')).decision, 'deny', 'an echo of the command\'s text');
+  assert.strictEqual(decideIn('light', 'SOURCES: `git log -1 --format=%h`', bashCall('t1', '# git log -1 --format=%h\npwd')).decision, 'deny', 'the command only in a comment');
+  // the whole-chain rule: a cited command that ran IS what was run, even an ls (light only; strict never counts a metadata command)
+  assert.strictEqual(decideIn('light', 'SOURCES: `ls -la C:/work/dir`', bashCall('t1', 'ls -la C:/work/dir')).decision, 'allow', 'light: the cited ls that ran');
+  assert.strictEqual(decideIn('strict', 'SOURCES: `ls -la C:/work/dir`', bashCall('t1', 'ls -la C:/work/dir')).decision, 'deny', 'strict: unchanged');
+  assert.strictEqual(decideIn('light', 'SOURCES: `cd /c/Users/x/repo && git log --oneline -1 main`', bashCall('t1', 'cd /c/Users/x/repo && git log --oneline -1 main')).decision, 'allow', 'the quoted cd-chain (D277) still matches');
+});
+
+test('D288 F1 TOO STRICT (the librarian\'s ring 2eb8b2bdd226): a relative grep after a cd matches the absolute item in BOTH modes, when the call completed', () => {
+  const cmd = 'cd /c/Users/n/lighthouse && grep -n "_evidence\\|SKIP" consonance/tools/js-suite.js | head -30';
+  for (const mode of ['strict', 'light']) assert.strictEqual(decideIn(mode, 'SOURCES: C:\\Users\\n\\lighthouse\\consonance\\tools\\js-suite.js', bashCall('t1', cmd)).decision, 'allow', mode);
+});
+
+test('D288 F1 THE REAL CAUSE of ring 2eb8b2bdd226: the same read inside a Bash call that ended non-zero (is_error) is refused in both modes, by the failed-call rule', () => {
+  const cmd = 'cd /c/Users/n/lighthouse && grep -n "SKIP" consonance/tools/js-suite.js | head -30; git check-ignore -v x';
+  for (const mode of ['strict', 'light']) {
+    const d = decideIn(mode, 'SOURCES: C:\\Users\\n\\lighthouse\\consonance\\tools\\js-suite.js', bashCall('t1', cmd, 'out', true));
+    assert.strictEqual(d.decision, 'deny', mode); assert.match(d.reason, /a failed call/);
+  }
+});
+
+test('D288 strict is unchanged: a bare path is still matched by any opening segment that names it, after a cd, by its tail', () => {
+  assert.strictEqual(decideIn('strict', 'SOURCES: C:/Users/n/lighthouse/exo_memory/loop/plan.md', bashCall('t1', 'cd /c/Users/n/lighthouse/exo_memory && cat loop/plan.md')).decision, 'allow');
+  assert.strictEqual(decideIn('strict', 'SOURCES: C:/work/a.md', bashCall('t1', 'node tools/x.js C:/work/a.md')).decision, 'allow', 'a program that is not a read verb still opens the path it is given');
+  assert.strictEqual(decideIn('strict', 'SOURCES: `cd /c/Users/x/repo && git log --oneline -1 main`', bashCall('t1', 'cd /c/Users/x/repo && git log --oneline -1 main')).decision, 'deny', 'strict never accepted a quoted chain');
+});
+
+// D309 (seat A): a ring that ends on the app's send line is still a ring (a boundary of the turn) and is not read as keeper text.
+test('D309 STAMP: a PANE or CHAIR ring that ends on the send line is still a boundary between the Read and the ring', () => {
+  const dir = tmpDir();
+  const SENT = '\n[sent 2026-10-12T07:25:51Z · Oct 12, 1:25 AM local]';
+  for (const text of ['[pane:B] D210 hand-back is at exo_memory/handback/p-x.md' + SENT, '\n\n<pasted_content id="e589">\n[chair:MAIN] D214 a 4th commit' + SENT + '\n</pasted_content id="e589">']) {
+    const r = runGate(dir, payloadOf(dir, [USER('go'), ...readCall('t1', ['C', ':/work/a.md'].join('')), NOTIF(), HUMAN(text)], { text: SRC_A }));   // the path is joined, so this row adds no drive literal to the portable-paths scan
+    assert.ok(isDeny(r), 'a stamped ring did not cut the turn: ' + text.slice(0, 30));
+  }
+});
+
+// D454 part 3 (pane E): the data dir by the app's rule (main.rs data_dir: data_dir from ~/.consonance.json when set, else %USERPROFILE%\.consonance).
+// A new user who keeps the default Data folder saves data_dir "" (ui/app.js), and the app gives panes no CONSONANCE_DATA, so without the third step
+// this gate had no ledger and allowed every ring.
+test('APP RULE (D454): with CONSONANCE_DATA unset and data_dir empty or absent, the ledger is USERPROFILE/.consonance and a ring with no SOURCES line is denied', () => {
+  for (const cfg of [{ data_dir: '' }, null]) {
+    const h = homeWith(cfg), data = path.join(h, '.consonance'); fs.mkdirSync(data);
+    const dir = tmpDir(), input = payloadOf(dir, [USER('go')], { text: 'no sources' });
+    const r = spawnSync(process.execPath, [HOOK], { input, env: { ...envFor(dir), CONSONANCE_DATA: '', USERPROFILE: h, HOME: h }, encoding: 'utf8', timeout: 20000 });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.match(r.stdout, /"permissionDecision":"deny"/, JSON.stringify(cfg) + ': ' + r.stdout);
+    assert.ok(fs.existsSync(path.join(data, 'sources-gate.jsonl')), 'the refusal is recorded under the default data dir');
+  }
 });

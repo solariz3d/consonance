@@ -186,6 +186,11 @@ $files = @(
   @{ From = 'consonance\hooks\push-gate.js';               To = 'hooks\push-gate.js' }
   @{ From = 'consonance\hooks\delete-gate.js';             To = 'hooks\delete-gate.js' }
   @{ From = 'consonance\hooks\ask-ending.js';              To = 'hooks\ask-ending.js' }
+  # Added 2026-10-09 (D281; the keeper: "you ding when the laps are complete, not like one if a new one opens, but when the final product is pushed, you ding through desktop audio even if
+  # minimized something pleasant") with its registration below, same commit. RELEASE-CHIME: a PostToolUse hook on the two shell tools that plays a built-in Windows sound when a
+  # `gh release create` or a `git push` that updated main on t180, consonance or lighthouse SUCCEEDED; one chime per 2 minutes; "chime": false in ~/.consonance.json silences it. It prints
+  # nothing, never blocks and fails silent. A NEW registration (the keeper asked for it). Install with -Only release-chime.js.
+  @{ From = 'consonance\hooks\release-chime.js';           To = 'hooks\release-chime.js' }
 )
 
 # What this script REGISTERS. Only these are ever touched in settings.json; anything else found
@@ -306,6 +311,9 @@ $register = @(
      Matcher = 'Bash|PowerShell' }
   # G3 (D248), SHADOW ONLY: a Stop hook, no matcher. Silent on every path (no output, exit 0); it only writes ask-ending.jsonl.
   @{ Event = 'Stop';             Rel = 'hooks\ask-ending.js';         Runner = 'node' }
+  # RELEASE-CHIME (D281): after a Bash or PowerShell call. Reads the command and what came back, and exits at once unless a release or a push to main really shipped.
+  @{ Event = 'PostToolUse';      Rel = 'hooks\release-chime.js';      Runner = 'node';
+     Matcher = 'Bash|PowerShell' }
 )
 
 # DELIBERATELY UNMANAGED -- the THIRD STATE, named. A file in a manifest source directory that is
@@ -341,6 +349,8 @@ $unmanaged = @(
      Why  = 'Stop hook that BLOCKS to wake the outgoing seat. sourced-stop.js refused a gate on this same event in writing; a blocking hook is the keeper call this one has not had. No ruling yet. PRECONDITION, measured 2026-09-08: NO CONSONANCE_DREAM guard either (grep -c -> 0). A blocking hook the dream runner cannot switch off is the worst member of that class.' }
   @{ Src = 'consonance\hooks\live-mirror-stop.js';
      Why  = 'Stop hook of the per-seat live mirror (L052, pane E). It reaches a NETWORK REMOTE every turn and moves the lease that decides which machine may drive a seat, so registering it is a keeper decision twice over: it publishes outward on its own (journal 2026-07-28 -- committing is not publishing, a human stays awake saying yes), and its measured state round trip is 4760ms against the keeper''s 5000ms bound at a ZERO poll interval, so wiring it does not yet deliver what it is for (consonance/tools/live-host.js roundTrip). The lease half alone is sound and proved end-to-end against the real remote; the state half is default-OFF behind CONSONANCE_MIRROR_STATE=1. It DOES carry a CONSONANCE_DREAM guard, unlike the two above. No ruling yet -- see a hand-back in this line of record.' }
+  @{ Src = 'consonance\hooks\claim-check.js';
+     Why  = 'The point-of-claim check (D305; design a registration in this line of record, bar a registration in this line of record). Built and OFF: it acts only when ~/.consonance.json sets claim_check to true (or "shadow"), and the librarian ruled it stays OFF at the 10-17 decision; wiring it (PreToolUse on the ring verbs, Write/Edit and Bash, and Stop) is the keeper''s call after the held-out replay. It needs ./units.js (exo_memory/loop/claimrec/units.js) beside it once installed, or it fails open. It DOES carry a CONSONANCE_DREAM guard. No ruling yet -- see a hand-back in this line of record.' }
   @{ Src = 'consonance\hooks\jev-flags.js';
      Why  = 'RETIRED, not unruled: Jev is off since D164, and D273 ruling 5 (2026-10-08) dropped its registration and its copy from this installer (the Excluded entry in $register). The file stays in the source repository as the record of what ran (a generated copy does not carry it); nothing installs it.' }
 )

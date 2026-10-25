@@ -195,15 +195,13 @@ The working method in three principles and one test: [`METHOD.md`](METHOD.md). C
 ### The tests, today
 
 ```
-node consonance/tools/js-suite.js                    (2026-09-25, on the desktop)
-    -> 139 green · 0 failed · 1 canary · 1 not run   (of 141 files)
-cd consonance/src-tauri && cargo test                (2026-09-25, on the desktop)
-    -> the main program: 961 passed · 0 failed · 4 ignored; every other target passed
+node consonance/tools/js-suite.js                    # every JS test file, with a universe report
+cd consonance/src-tauri && cargo test                # the Rust tests
 ```
 
-Both runs are recorded in [`p-d138-waiting-C_2026-09-25.md`](https://github.com/solariz3d/lighthouse/blob/main/exo_memory/handback/p-d138-waiting-C_2026-09-25.md).
-The "canary" is a test that is meant to fail and is not counted. The one "not run" declares itself tied to one
-machine's data, and says so rather than guessing when that data is not there.
+Run them for the figures; this page gives none, because the counts change with every lap and a generated copy leaves some
+files out. In js-suite's report a "canary" is a test that is meant to fail and is not counted, and a "not run" is a file that
+declares itself tied to one machine's data and says so rather than guessing when that data is not there.
 
 ### The central claim, and its evidence
 
@@ -273,9 +271,13 @@ app. What it measured while it ran was moved, word for word, into this page's hi
 
 ### Where the record lives
 
-- [`exo_memory/`](exo_memory/) — the project's record: the start-up document every session wakes into
-  ([`exo_memory/BOOT.md`](exo_memory/BOOT.md)), the journals, the plans written before each test, and every result
-  above.
+- [`exo_memory/`](exo_memory/) — this room: the start-up document every session wakes into
+  ([`exo_memory/BOOT.md`](exo_memory/BOOT.md)), which carries the fork note (where this copy forks from the room it grew
+  from; its template is [`consonance/src-tauri/brief/frag-fork.md`](consonance/src-tauri/brief/frag-fork.md)), and your own
+  journal, empty until you write it.
+- [`exo_memory/inheritance/`](exo_memory/inheritance/) — the keeper's record from that room (the journals, the letters),
+  kept apart and labelled as theirs; [`exo_memory/CUTOFF.md`](exo_memory/CUTOFF.md) names the commit it ends at. The plans
+  and results this page cites are in the public lighthouse repository.
 - [`dev/SPINE.md`](dev/SPINE.md) — the original design statement, kept as it was written.
 - [`readme_history_2026-09-25.md`](https://github.com/solariz3d/lighthouse/blob/main/exo_memory/loop/readme_history_2026-09-25.md) — this page's own history: the notes,
   corrections and superseded wording it used to carry inline, moved there word for word.

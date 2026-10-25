@@ -12,7 +12,14 @@ const { spawnSync } = require('child_process');
 
 const HOOK = path.join(__dirname, 'delete-gate.js');
 const G = require('./delete-gate.js');
-const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
+// D287: OS_TMP is the machine's REAL temp dir (js-suite hands each file a redirected TEMP and passes the real one as CONSONANCE_OS_TMP), ON PURPOSE (the MSYS /tmp/... row below needs the folder where Git Bash maps /tmp); still removed at exit.
+const OS_TMP = process.env.CONSONANCE_OS_TMP || os.tmpdir();
+const tmp = (p) => require('../tools/scratch.js').mkdtemp(p, OS_TMP);
+// D454 (B, from E's stranger run): ENV-ONLY for the /tmp/... form. Git Bash maps /tmp from the ACCOUNT's profile, not from %TEMP%; in a real account
+// (and under js-suite, which passes the real one as CONSONANCE_OS_TMP) the two agree. A contained run that moves TEMP off the profile separates
+// them, and then the /tmp form names a different folder. Said, not failed; the /c/... form still runs everywhere.
+const GIT_BASH_TMP = (() => { if (process.platform !== 'win32') return null; const r = spawnSync('cygpath', ['-w', '/tmp'], { encoding: 'utf8' }); return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null; })();
+const TMP_APART = (() => { try { return GIT_BASH_TMP && fs.realpathSync(GIT_BASH_TMP).toLowerCase() !== fs.realpathSync(OS_TMP).toLowerCase() && `needs a set-up account: Git Bash maps /tmp to ${GIT_BASH_TMP}, not to this run's temp dir ${OS_TMP}; they agree in a real account, and a run that moves TEMP off the profile separates them`; } catch (_) { return false; } })();
 /** A tree to delete with a junction inside it, pointing at a precious directory outside it. */
 function tree({ link = true } = {}) {
   const root = tmp('dg-'), wt = path.join(root, 'worktree'), precious = path.join(root, 'precious');
@@ -43,11 +50,12 @@ test('RED: a relative target is read from the cwd, and from `git -C <dir>`; a wi
   assert.equal(runHook(cmd(`git -C "${t.root}" worktree remove worktree`, os.tmpdir()), data).deny, true);
   assert.equal(runHook(cmd(`rm -rf "${t.wt}"/*`, t.root), data).deny, true);
 });
-test('RED: the Bash tool\'s MSYS paths are read as Git Bash means them: /c/Users/... and /tmp/... (the push gate\'s live failure, 2026-10-06)', { skip: process.platform !== 'win32' && 'MSYS paths are a Windows matter' }, () => {
+test('RED: the Bash tool\'s MSYS paths are read as Git Bash means them: /c/Users/... and /tmp/... (the push gate\'s live failure, 2026-10-06)', { skip: process.platform !== 'win32' && 'MSYS paths are a Windows matter' }, (tc) => {
   const t = tree(), data = tmp('dgd-');
   const msys = t.wt.replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`).replace(/\\/g, '/');
   assert.equal(runHook(cmd(`rm -rf ${msys}`, os.homedir()), data).deny, true, 'the /c/... form');
-  const viaTmp = '/tmp/' + path.relative(fs.realpathSync(os.tmpdir()), fs.realpathSync(t.wt)).replace(/\\/g, '/');
+  if (TMP_APART) return tc.skip(TMP_APART);
+  const viaTmp = '/tmp/' + path.relative(fs.realpathSync(OS_TMP), fs.realpathSync(t.wt)).replace(/\\/g, '/');
   assert.equal(runHook(cmd(`git worktree remove ${viaTmp}`, os.homedir()), data).deny, true, 'the /tmp/... form');
 });
 test('RED: an environment variable in the target is expanded ($env:NAME, ${NAME}, $NAME) (found live: "$env:TEMP\\x" was read as a literal path)', () => {
@@ -121,4 +129,18 @@ test('cygpath is looked for on PATH, then under this machine\'s own Program File
   const here = G.cygpathCandidates();
   assert.strictEqual(here[0], 'cygpath', 'PATH first');
   if (process.platform === 'win32' && process.env.ProgramFiles) assert.ok(here.includes(path.win32.join(process.env.ProgramFiles, 'Git', 'usr', 'bin', 'cygpath.exe')), 'and this machine\'s own Program Files after it');
+});
+
+// D454 part 3 (pane E): the data dir by the app's rule (main.rs data_dir: data_dir from ~/.consonance.json when set, else %USERPROFILE%\.consonance).
+// A new user who keeps the default Data folder saves data_dir "" and panes get no CONSONANCE_DATA, so this gate denied but kept no ledger: a refusal with no record.
+test('APP RULE (D454): with CONSONANCE_DATA unset and data_dir empty, a delete through a junction is still refused and recorded under USERPROFILE/.consonance', () => {
+  const h = require('../tools/scratch.js').mkdtemp('app-rule-home-'), def = path.join(h, '.consonance'); fs.mkdirSync(def); fs.writeFileSync(path.join(h, '.consonance.json'), JSON.stringify({ data_dir: '' }));
+  const strangerEnv = (extra = {}) => { const e = { ...process.env, USERPROFILE: h, HOME: h, CONSONANCE_DREAM: '', ...extra }; delete e.CONSONANCE_DATA; return e; };
+  const t = tree();
+  const r = spawnSync(process.execPath, [HOOK], { input: JSON.stringify(cmd(`rm -rf "${t.wt}"`, t.root)), encoding: 'utf8', env: strangerEnv() });
+  const j = r.stdout.trim() ? JSON.parse(r.stdout) : null;
+  assert.equal(r.status, 0); assert.equal(j && j.hookSpecificOutput.permissionDecision, 'deny', r.stdout);
+  const lp = path.join(def, G.LEDGER);
+  assert.ok(fs.existsSync(lp) && fs.readFileSync(lp, 'utf8').includes('"decision":"deny"'), 'the deny is recorded under the default data dir');
+  assert.equal(fs.readFileSync(path.join(t.precious, 'keep.txt'), 'utf8'), 'irreplaceable', 'the hook deletes nothing');
 });

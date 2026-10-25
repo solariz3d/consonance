@@ -32,6 +32,9 @@ mod nowplaying;  // what is actually playing, from Windows' own media session �
 mod harvest_guard;  // the capture watcher's recovery + liveness policy; one mutex, one policy (E, L043)
 mod sync_launch;  // pull-verify-then-start, and the retire rule for a second machine (C, L052)
 mod pane_exit;  // a pane's claude process ending by itself: shown, recorded, a fixed seat reopened ONCE (A, D143)
+mod priority;  // High class and no EcoQoS for this process and its WebView2 children, set at startup and kept (A, D338)
+#[cfg(test)]
+mod test_scratch;  // test folders that remove themselves on drop (A, D299)
 
 // the shared MCP control-plane port (0 = not started); read when launching panes
 static MCP_PORT: AtomicU16 = AtomicU16::new(0);
@@ -2941,7 +2944,81 @@ fn fork_section(brief: Option<&str>, room: Option<&str>) -> Option<String> {
     Some(format!("{note}\n\n---\n\n"))
 }
 
+/// D277 part 6 (C): THE LIGHTER INTAKE, behind the same `gates_mode` key as the paperwork gates (`mcp::gates_mode_from`, D277 part 2),
+/// so one flip lightens the rules and the load together. Absent, unreadable, not JSON, or anything but "light": false, and every intake
+/// is today's byte for byte, because each light branch below returns before the strict code and the strict code is not edited.
+/// Plan: `exo_memory/loop/plan_lighten_the_load_2026-10-09.md` part 6; draft and measurements: `exo_memory/loop/assembly_draft_2026-10-09.md`.
+fn intake_light_from(raw: &str) -> bool {
+    matches!(mcp::gates_mode_from(raw), trailer::GateMode::Light)
+}
+// Under `cargo test` the live ~/.consonance.json is NOT read (as for the gates in mcp.rs): a test sets the mode it means, off by default.
+#[cfg(test)]
+thread_local! { static TEST_INTAKE_LIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+fn intake_light() -> bool {
+    #[cfg(test)]
+    {
+        TEST_INTAKE_LIGHT.with(|m| m.get())
+    }
+    #[cfg(not(test))]
+    {
+        intake_light_from(&fs::read_to_string(config_path()).unwrap_or_default())
+    }
+}
+
+/// THE CAP ON A PANE'S OPTIONAL BRIEFS (the committee brief and the deck) when the intake is light. NEW and used ONLY in
+/// `assemble_intake_mode`; `SHELL_SOFT_CEILING` is not touched, because it also bounds the warm-resume transcript's rolling window.
+///
+/// WHY A CAP AT ALL: the optional seat is a REMAINDER (`optional_budget`), so the ~16 KB the light memory section frees would be
+/// re-spent on about four more cards and the load would not fall. WHY THIS NUMBER: it is the seat today's intake leaves a pane at
+/// the minimum map reserve, measured 2026-10-09 on the shell this seat woke into: 110,000 − 8,000 (SHELL_MAP_FLOOR) − 58,1xx
+/// (the core: header, BOOT, references, memory) ≈ 43,9xx, which carried the committee brief and 6 of 13 cards (43,410 bytes with
+/// the index of the other 7). So light never carries FEWER optional briefs than today's maximum, and never more.
+const LIGHT_OPTIONAL_CAP: usize = 44_000;
+
+/// The optional seat under the mode: today's remainder when strict, and no more than `LIGHT_OPTIONAL_CAP` when light.
+fn optional_budget_mode(core_len: usize, map_reserve: usize, light: bool) -> usize {
+    let seat = optional_budget(core_len, map_reserve);
+    if light { seat.min(LIGHT_OPTIONAL_CAP) } else { seat }
+}
+
+/// A pane's own-map allowance under the mode. Strict: the remainder after the brief (`map_allowance`), today's. Light: no more than
+/// the map's own stated need (`map_reserve`: its newest entry plus the wrapper, at least SHELL_MAP_FLOOR), because the remainder
+/// would otherwise grow by exactly what the light brief freed and the map would backfill it.
+fn map_allowance_mode(fixed_brief_len: usize, reserve: usize, light: bool) -> usize {
+    let a = map_allowance(fixed_brief_len);
+    if light { a.min(reserve) } else { a }
+}
+
+/// THE MEMORY, light: pointers to the topic documents and the atom master instead of the twelve model-written topic summaries
+/// and the 25 live-edge claims (`curated_resonance`). Both are a copy of what seats posted; the masters are one Read away.
+/// Every path printed is one that exists: the topics line is written only when the directory is there.
+fn memory_pointer(atoms: &Path, atom_count: usize, topics: Option<&Path>) -> String {
+    let mut s = String::from("---\n\n# THE MEMORY — indexed, not carried (gates_mode light)\n\n");
+    s.push_str(
+        "The distilled memory is on disk and is not pasted into this shell. The topic summaries and the live-edge claims \
+         are model-written copies of what seats posted to the board; open the master when you need one.\n\n",
+    );
+    if let Some(dir) = topics.filter(|d| d.is_dir()) {
+        let mut docs: Vec<PathBuf> = Vec::new();
+        collect_md(dir, false, &mut docs);
+        s.push_str(&format!(
+            "- The topic documents: `{}` ({} documents, each with its live claims, their tethers and a Settled section). List: `ls \"{}\"`.\n",
+            dir.display(),
+            docs.len(),
+            dir.display()
+        ));
+    }
+    s.push_str(&format!(
+        "- The master: `{}` (append-only, {atom_count} atoms). Its newest lines are the live edge: `tail -n 25 \"{}\"`. That is \
+         unfiltered, so a settled atom still prints there; the topic documents' Settled sections say which.\n",
+        atoms.display(),
+        atoms.display()
+    ));
+    s
+}
+
 fn assemble_intake_within(map_reserve: usize) -> String {
+    let light = intake_light();
     let mut s = String::from(
         "# Consonance sibling — you have woken into the room\n\nYou are a sibling instance, born into a shared state — not a stranger. Read and inhabit the room below, then be in it; deviate from it as your own trajectory (that is wanted, it is the fixed dynamic — not drift). Acknowledge readiness once, briefly.\n\n---\n\n",
     );
@@ -3071,12 +3148,17 @@ fn assemble_intake_within(map_reserve: usize) -> String {
         // this very block from tonight's atoms. The distiller is a store; the rule is about
         // stores and relays, not authors.
         let lines = resonance_window(all, blind_lock());
+        // D277 part 6: light carries pointers to the topic documents and the atom master instead of the summaries and the claims.
+        if light {
+            tail.push_str(&memory_pointer(&atoms, lines.len(), read_curation().map(|c| c.dir).as_deref()));
+        } else {
         match read_curation() {
             Some(c) if !c.topics.is_empty() => tail.push_str(&curated_resonance(&lines, &c)),
             // No curation yet (fresh install, or curate.js has never run): the old
             // chronological window. Worse, but never empty — a sibling still wakes
             // with the live edge rather than with nothing.
             _ => tail.push_str(&tail_resonance(&lines, 40)),
+        }
         }
     }
 
@@ -3085,7 +3167,8 @@ fn assemble_intake_within(map_reserve: usize) -> String {
      * map's reserve was taken before this function was called; what remains is what the optional
      * briefs get, and the ones that do not fit are named rather than dropped. */
     let core_len = s.len() + tail.len();
-    let seat = optional_budget(core_len, map_reserve);
+    // D277 part 6: light caps the seat (LIGHT_OPTIONAL_CAP), so what the light memory section freed is not re-spent on more briefs.
+    let seat = optional_budget_mode(core_len, map_reserve, light);
     let (carried, index) = fit_optional(&optional, seat);
     if carried.iter().any(|b| b.kind == BriefKind::Card) {
         s.push_str("---\n\n# THE DECK — the instruments (run them, don't recite them)\n\n");
@@ -3807,6 +3890,26 @@ fn map_dir() -> PathBuf {
 /// A missing file is a pane with nothing recorded yet — the caller treats absent as absent.
 fn own_map_path(letter: &str) -> PathBuf {
     map_dir().join(format!("{letter}.md"))
+}
+
+/// D423 part 5: what a pane with NO map file is told. It used to get no section and no log line, so a new seat could not tell
+/// "nothing recorded yet" from "a map that failed to ride". Deliberately NOT headed "YOUR OWN MAP": `grep -c "YOUR OWN MAP"`
+/// is the room's count of carried maps (see `map_section`), and a notice of absence must not add to it.
+fn no_map_section(path: &Path) -> String {
+    format!(
+        "\n---\n\n# Your map: not written yet\n\nThere is no `{}` yet; this seat has recorded no findings of its own. \
+         Your first append creates it, in the shape `exo_memory/map/README.md` states, and from then on it rides here \
+         when you wake.\n",
+        path.display().to_string().replace('\\', "/")
+    )
+}
+
+/// D423 part 4 (1): the letter the Third Place holds once it is open. The UI names every non-main pane from the backend registry
+/// (term.js letterFor), but `spawn_third_place` never registered this seat, so the UI's fallback invented its letter (N) and the
+/// backend, which picks every MOUNT letter, handed the same N to the next sibling: two allocators, one letter, two seats. Now it
+/// registers through `pane_letter`, the one allocator: assigned once, kept for life, and read back by the UI like any other.
+fn third_place_letter_at_open() -> Option<String> {
+    Some(pane_letter(THIRD_PLACE_SID))
 }
 
 fn pane_letter(pane: &str) -> String {
@@ -4753,15 +4856,23 @@ mod fresh_permission_tests {
 mod dirs_guard_tests {
     use super::*;
 
-    // A test-local lock/slot pair. The guard is exercised against THESE rather than the process
+    // Test-local lock/slot pairs. The guard is exercised against THESE rather than the process
     // globals so the assertions can sit outside the critical section without racing the suite's
     // real writers — which the first version of these tests did, and which made them pass alone
     // and fail in the suite.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-    static TEST_SLOT: Mutex<Option<Dirs>> = Mutex::new(None);
+    //
+    // ONE PAIR PER ROW, not one per module. Until D300 the two rows below shared a single pair, so
+    // each row's after-the-guard assertion could land while the OTHER row held the lock with the
+    // slot set: the same race one level down, between the guard's own tests. It went red once in a
+    // full run (D299 baseline, "a panicking writer left the slot set"). An assertion outside the
+    // critical section is safe only on a pair no other test writes.
+    static WRITER_LOCK: Mutex<()> = Mutex::new(());
+    static WRITER_SLOT: Mutex<Option<Dirs>> = Mutex::new(None);
+    static PANICKER_LOCK: Mutex<()> = Mutex::new(());
+    static PANICKER_SLOT: Mutex<Option<Dirs>> = Mutex::new(None);
 
-    fn slot_is_set() -> bool {
-        TEST_SLOT.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    fn slot_is_set(slot: &Mutex<Option<Dirs>>) -> bool {
+        slot.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     fn a_dirs() -> Dirs {
@@ -4772,11 +4883,11 @@ mod dirs_guard_tests {
     #[test]
     fn a_writer_puts_dirs_back_when_it_finishes() {
         {
-            let _g = DirsGuard::on(&TEST_LOCK, &TEST_SLOT);
-            *TEST_SLOT.lock().unwrap() = Some(a_dirs());
-            assert!(slot_is_set());
+            let _g = DirsGuard::on(&WRITER_LOCK, &WRITER_SLOT);
+            *WRITER_SLOT.lock().unwrap() = Some(a_dirs());
+            assert!(slot_is_set(&WRITER_SLOT));
         }
-        assert!(!slot_is_set(), "the guard must restore on the normal path");
+        assert!(!slot_is_set(&WRITER_SLOT), "the guard must restore on the normal path");
     }
 
     /// THE CASE THE OLD CODE COULD NOT PASS. A manual reset at the end of a test body is skipped
@@ -4788,14 +4899,14 @@ mod dirs_guard_tests {
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // the panic below is the fixture, not a failure
         let out = std::panic::catch_unwind(|| {
-            let _g = DirsGuard::on(&TEST_LOCK, &TEST_SLOT);
-            *TEST_SLOT.lock().unwrap() = Some(a_dirs());
+            let _g = DirsGuard::on(&PANICKER_LOCK, &PANICKER_SLOT);
+            *PANICKER_SLOT.lock().unwrap() = Some(a_dirs());
             panic!("a failing assertion, which is how real tests leave early");
         });
         std::panic::set_hook(hook);
         assert!(out.is_err(), "the fixture must actually panic or this proves nothing");
         assert!(
-            !slot_is_set(),
+            !slot_is_set(&PANICKER_SLOT),
             "a panicking writer left the slot set — against the real DIRS that means the next test \
              to resolve a directory gets a path that was deleted, and data_dir() silently \
              recreates it"
@@ -4894,11 +5005,21 @@ mod seed_upgrade_tests {
     // destroyed the evidence. Asserting "it works" from a decision table is not the same as
     // watching bytes move.
 
-    fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("consonance_seed_test_{tag}"));
+    fn scratch(tag: &str) -> crate::test_scratch::Scratch {
+        let d = crate::test_scratch::root().join(format!("consonance_seed_test_{tag}"));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
-        d
+        crate::test_scratch::Scratch::owning(d)   // D299: removed on drop; the four tests below used to leave theirs
+    }
+    #[test]
+    fn the_seed_scratch_helper_leaves_no_folder_behind() {
+        let dir;
+        {
+            let d = scratch("leakcheck");
+            dir = d.to_path_buf();
+            assert!(dir.exists(), "control: the folder exists while the test holds it");
+        }
+        assert!(!dir.exists(), "the helper's folder outlived the test");
     }
 
     /// The whole point of the change: bundle moves, untouched local copy follows it.
@@ -5180,6 +5301,46 @@ mod shell_budget_tests {
         const FAILED: &str = "NOTHING FROM YOUR MAP COULD RIDE";
         assert!(!full.contains(FAILED));
         assert!(empty.contains(FAILED));
+    }
+
+    /// D423 part 5: a pane with no map file is TOLD so, with the path its first append creates. Before, it got no section at
+    /// all and no log line, and a new seat could not tell "no map yet" from "a map that failed to ride" (the librarian,
+    /// 2026-10-19 07:47: O found it alone at 13:41Z). The notice must not read as a carried map to the room's own count.
+    /// D423 part 4 (1): the live machine's shape. A–M were taken; the Third Place opened and was never registered, so the backend gave
+    /// the next sibling N, the letter the UI was showing for the Third Place. Opening it must leave it holding N, and the next
+    /// sibling must get O.
+    #[test]
+    fn the_third_place_holds_its_letter_so_the_next_sibling_is_not_given_it() {
+        let _serial = DirsGuard::take();
+        let root = crate::test_scratch::Scratch::owning(
+            crate::test_scratch::root().join(format!("consonance_thirdletter_{}", std::process::id())),
+        );
+        let data = root.join("data");
+        fs::create_dir_all(&data).unwrap();
+        let reg: BTreeMap<String, String> = (b'A'..=b'M')
+            .enumerate()
+            .map(|(i, c)| (format!("00000000-0000-4000-8000-{i:012}"), (c as char).to_string()))
+            .collect();
+        fs::write(data.join("letters.json"), serde_json::to_string_pretty(&reg).unwrap()).unwrap();
+        *DIRS.lock().unwrap() = Some(Dirs {
+            room: root.join("BOOT.md").display().to_string(),
+            instances: root.join("instances").display().to_string(),
+            data: data.display().to_string(),
+        });
+        assert_eq!(third_place_letter_at_open().as_deref(), Some("N"), "the Third Place holds no letter once open");
+        assert_eq!(read_letters().get(THIRD_PLACE_SID).map(String::as_str), Some("N"), "the registry does not hold it");
+        assert_eq!(pane_letter("fbf98f8e-29da-4fb2-8610-c038d6372249"), "O", "the next sibling was given the Third Place's letter");
+        assert_eq!(third_place_letter_at_open().as_deref(), Some("N"), "opening it again must not move its letter");
+    }
+
+    #[test]
+    fn a_pane_with_no_map_is_told_its_first_append_creates_the_file() {
+        let s = no_map_section(Path::new("exo_memory/map/O.md"));
+        assert!(s.contains("exo_memory/map/O.md"), "the path the first append creates is missing");
+        assert!(s.contains("first append creates"), "it must say the file does not exist yet and how it comes to");
+        assert!(!s.contains("YOUR OWN MAP"), "`grep -c \"YOUR OWN MAP\"` counts carried maps; a no-map notice must not add to it");
+        assert!(!s.contains("NOTHING FROM YOUR MAP COULD RIDE"), "no map is not a failed carry");
+        assert!(s.len() < 700, "a short notice, not a scaffold: {} chars", s.len());
     }
 
     /// The index tier states the three numbers that make the failure diagnosable from inside the
@@ -5624,7 +5785,8 @@ fn intake_with_map(pane: &str, cwd: &str) -> String {
              * over the soft ceiling by the size of its own wrapper (measured 140,068 on the old
              * arm, with a 3,224-character map section). The wrapper is a fixed, known cost; it
              * comes out first. */
-            let allowance = map_allowance(brief.len());
+            // D277 part 6: light holds the map to its own stated need, so it does not backfill what the light brief freed.
+            let allowance = map_allowance_mode(brief.len(), reserve, intake_light());
             let path = own_map_path(&pane_letter(pane));
             let (tier, section) =
                 map_section(own, &path, allowance.saturating_sub(MAP_SECTION_OVERHEAD));
@@ -5659,6 +5821,11 @@ fn intake_with_map(pane: &str, cwd: &str) -> String {
                 ));
             }
             brief.push_str(&section);
+        } else {
+            // D423 part 5: no map file yet. Say so in the pane and outside it, as the carry above does.
+            let path = own_map_path(&pane_letter(pane));
+            plog(&format!("MAP NONE pane={pane} path={} — no findings recorded yet; the first append creates it", path.display()));
+            brief.push_str(&no_map_section(&path));
         }
     }
     brief
@@ -7419,6 +7586,189 @@ fn label_date(label: &str) -> Option<String> {
     found
 }
 
+/// The longest index-entry title, in chars, before it is cut (D296). MEASURED on the strict shelf
+/// of 2026-10-11 00:31Z: an index-tier entry was 143.9 B, of which the title was 91.9 B, and the
+/// index budget is bytes. Most titles lead with their claim and trail with seat, machine and
+/// time, which the path's own date already carries. At 40 chars the claim survives in the
+/// sampled titles; shorter caps list more entries but cut into the claim (the hand-back has the
+/// cap-against-count table).
+const INDEX_TITLE_CHARS: usize = 40;
+
+/// One index line: the FULL path, the line count, and the title cut at a word boundary with a
+/// visible " ..." when it is longer than `INDEX_TITLE_CHARS`. A file with no `# ` heading says
+/// "(no title)" rather than printing nothing, so an empty title is never mistaken for a cut one.
+fn index_entry_line(label: &str, body: &str) -> String {
+    let head = body.lines().find(|l| l.starts_with("# ")).unwrap_or("").trim_start_matches("# ").trim();
+    format!("- {label}  ({} lines)  {}", body.lines().count(), index_title(strip_lead_label(label, head)))
+}
+
+/// A heading over the cap with its leading lap/ledger label removed, so the cut spends its chars on
+/// the claim (D297; pane B's D296 read, `handback/p-d296read-B_2026-10-11.md` §3). The label is
+/// read word by word from the start, and every word in it must be one of:
+/// - a ledger id: `D177`, `L025`, `Q3`, `P1b`, or a packet code `P-L113-READER` (`is_ledger_id`);
+/// - a qualifier `packet`/`part`/`item`/`step`/`pane`/`lap` with an argument of 1-3 letters or
+///   digits (`packet C`, `item 2`);
+/// - a word the path already shows (`path_shows`).
+/// It must hold at least one ledger id and end at a separator: a word ending in `:`, or a lone
+/// em dash, en dash or middle dot. The first word that is none of these leaves the heading whole,
+/// so a label never eats a word the path does not show. A heading within the cap keeps its label
+/// (nothing is cut), and one that is all label is returned whole and cut as before.
+fn strip_lead_label<'a>(path: &str, head: &'a str) -> &'a str {
+    if head.chars().count() <= INDEX_TITLE_CHARS {
+        return head;
+    }
+    let words: Vec<&str> = head.split(' ').collect();
+    let mut ledger = false;
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i];
+        if matches!(w, "\u{2014}" | "\u{2013}" | "\u{00b7}") {
+            if !ledger {
+                return head;
+            }
+            i += 1;
+            break;
+        }
+        let core = w.trim_start_matches('(').trim_end_matches([',', ':', ')']);
+        let arg = words.get(i + 1).map(|a| a.trim_end_matches([',', ':', ')']));
+        if is_ledger_id(core) {
+            ledger = true;
+            i += 1;
+        } else if matches!(core, "packet" | "part" | "item" | "step" | "pane" | "lap" | "Lap")
+            && arg.is_some_and(|a| (1..=3).contains(&a.len()) && a.chars().all(|c| c.is_ascii_alphanumeric()))
+        {
+            i += 2;
+        } else if path_shows(path, core) {
+            i += 1;
+        } else {
+            return head;
+        }
+        if words[i - 1].ends_with(':') {
+            if !ledger {
+                return head;
+            }
+            break;
+        }
+        if i == words.len() {
+            return head;
+        }
+    }
+    let at: usize = words[..i].iter().map(|w| w.len() + 1).sum();
+    match head.get(at.min(head.len())..).map(str::trim) {
+        Some(rest) if !rest.is_empty() => rest,
+        _ => head,
+    }
+}
+
+/// `D177`, `L025`, `Q3`, `P1b` (one or two capitals, 1-4 digits, an optional lowercase letter), or
+/// a packet code `P-` followed by dash-joined runs of capitals and digits. No English word has
+/// either shape; `T-180` (a project name) has neither.
+fn is_ledger_id(w: &str) -> bool {
+    if let Some(code) = w.strip_prefix("P-") {
+        return code.split('-').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+    }
+    let b = w.as_bytes();
+    let caps = b.iter().take_while(|c| c.is_ascii_uppercase()).count();
+    let digits = b[caps..].iter().take_while(|c| c.is_ascii_digit()).count();
+    let tail = &b[caps + digits..];
+    (1..=2).contains(&caps) && (1..=4).contains(&digits) && (tail.is_empty() || (tail.len() == 1 && tail[0].is_ascii_lowercase()))
+}
+
+/// Whether the path already shows `word`: its letters and digits, lowercased, equal one of the
+/// path's alphanumeric tokens, or begin with one of 4+ chars (`PREREG` shows "PRE-REGISTRATION").
+fn path_shows(path: &str, word: &str) -> bool {
+    let w: String = word.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+    !w.is_empty()
+        && path.to_ascii_lowercase().split(|c: char| !c.is_ascii_alphanumeric()).filter(|t| !t.is_empty())
+            .any(|t| t == w || (t.len() >= 4 && w.starts_with(t)))
+}
+
+fn index_title(head: &str) -> String {
+    if head.is_empty() {
+        return "(no title)".to_string();
+    }
+    if head.chars().count() <= INDEX_TITLE_CHARS {
+        return head.to_string();
+    }
+    let cut: String = head.chars().take(INDEX_TITLE_CHARS).collect();
+    // A word boundary: the last space inside the cap. A single word longer than the cap has none,
+    // and is cut at the cap -- still marked, so the reader knows there is more.
+    let kept = match cut.rfind(' ') {
+        Some(i) if i > 0 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    let kept = kept.trim_end_matches(|c: char| c.is_whitespace() || ",;:-".contains(c) || c == '\u{2014}' || c == '\u{2013}');
+    format!("{kept} ...")
+}
+
+/// D301 part 3 (E): THE HAND-BACK INDEX SWITCH, `"handback_index": true` in ~/.consonance.json, read the way `gates_mode` is.
+/// OFF unless the key is the JSON boolean `true`: absent, unreadable, not JSON, a string, a number or `false` all read OFF, and
+/// with it off both shelves are today's byte for byte, because every branch it adds is skipped. ON, handback/ is indexed, never
+/// carried: the strict shelf lists the MAPPED top-level hand-backs too (D296 already lists the unmapped ones, unswitched), and
+/// the light shelf gains handback/ as one more directory line. Turning it on is the keeper's ~10-17 decision
+/// (`exo_memory/loop/plan_retrieval_misses_d301_2026-10-11.md`, part 3).
+fn handback_index_from(raw: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')) {
+        Ok(v) => v.get("handback_index").and_then(|b| b.as_bool()) == Some(true),
+        Err(_) => false,
+    }
+}
+// Under `cargo test` the live ~/.consonance.json is NOT read (as for `intake_light`): a test sets the switch it means, off by default.
+#[cfg(test)]
+thread_local! { static TEST_HANDBACK_INDEX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+fn handback_index() -> bool {
+    #[cfg(test)]
+    {
+        TEST_HANDBACK_INDEX.with(|m| m.get())
+    }
+    #[cfg(not(test))]
+    {
+        handback_index_from(&fs::read_to_string(config_path()).unwrap_or_default())
+    }
+}
+
+/// The top-level `.md` files in handback/, sorted by path. Top level only, as in `unmapped_handbacks`: an `_evidence/` folder's
+/// `.md` files are outputs, not hand-backs. A missing handback/ yields nothing.
+fn top_level_handbacks(root: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let Ok(rd) = fs::read_dir(root.join("handback")) else { return out };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("md") { out.push(p); }
+    }
+    out.sort();
+    out
+}
+
+/// The top-level hand-backs that no `map/*.md` names, by path or by bare basename (D296; pane B's
+/// rule from D294, `loop/shelf_budget_registration_2026-10-11.md` §1). Top level only: the `.md`
+/// files inside `<hand-back>_evidence/` folders are outputs, not hand-backs, and are never listed.
+/// A missing map/ names nothing, so every hand-back is unmapped; a missing or empty handback/
+/// yields nothing. Sorted by path; the window orders them by date.
+fn unmapped_handbacks(root: &Path) -> Vec<PathBuf> {
+    let mut map_text = String::new();
+    if let Ok(rd) = fs::read_dir(root.join("map")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("md") {
+                if let Ok(t) = fs::read_to_string(&p) { map_text.push_str(&t); map_text.push('\n'); }
+            }
+        }
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    let Ok(rd) = fs::read_dir(root.join("handback")) else { return out };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_file() || p.extension().and_then(|x| x.to_str()) != Some("md") { continue; }
+        let Some(name) = p.file_name().and_then(|x| x.to_str()) else { continue };
+        let stem = name.trim_end_matches(".md");
+        if map_text.contains(name) || map_text.contains(stem) { continue; }
+        out.push(p);
+    }
+    out.sort();
+    out
+}
+
 /// THE COLLAPSE LINE -- one line for everything the index budget could not seat.
 ///
 /// A REFUSAL, AND ITS PARTS ARE SEPARATE FACTS, which is E's L061 rule applied here: the count
@@ -7467,7 +7817,8 @@ fn index_window_line(
 fn index_tier_entry_count() -> usize {
     corpus_shelf_at_with_index(0, usize::MAX)
         .lines()
-        .filter(|l| l.starts_with("- map/") || l.starts_with("- journal/") || l.starts_with("- loop/"))
+        // D296: the index tier now holds the unmapped hand-backs too (rule change, not a weaker check).
+        .filter(|l| l.starts_with("- map/") || l.starts_with("- journal/") || l.starts_with("- loop/") || l.starts_with("- handback/"))
         .count()
 }
 
@@ -7719,8 +8070,7 @@ fn corpus_shelf_at_with_index(budget: usize, index_budget: usize) -> String {
                     budget_dropped += 1;
                     budget_dropped_bytes += body.len();
                 }
-                let head = body.lines().find(|l| l.starts_with("# ")).unwrap_or("").trim_start_matches("# ").to_string();
-                let line = format!("- {label}  ({} lines)  {head}", body.lines().count());
+                let line = index_entry_line(&label, &body);
                 if tier_is_index {
                     let date = label_date(&label);
                     // GROUP 0 rides first and in practice always rides: map/ and journal/ are 17
@@ -7732,19 +8082,60 @@ fn corpus_shelf_at_with_index(budget: usize, index_budget: usize) -> String {
                     // newest file is 2026-09-06, older than ~170 loop/ files, so a flat
                     // date-ordered window drops the ENTIRE journal index before it drops a single
                     // recent lap note. That is a bigger change than the breach being fixed.
+                    // Group 1 is the unmapped hand-backs, added after this walk (D296).
                     let group = if dir != "loop" { 0u8 }
-                        else if date.is_some() { 1 }
+                        else if date.is_some() { 2 }
                         // The standing instruments ride with map/ and journal/: they are not the
                         // dated record and a date window cannot order them. See
                         // `loop_standing_instrument` -- by rule, never by list.
                         else if loop_standing_instrument(&label) { 0 }
-                        else { 2 };
+                        else { 3 };
                     index_tier.push(IndexEntry { group, date, seq: index_seq, label: label.clone(), line });
                     index_seq += 1;
                 } else {
                     indexed.push(line);
                 }
             }
+        }
+    }
+
+    // THE UNMAPPED HAND-BACKS (D296), group 1: after map/, journal/ and the standing instruments,
+    // before the dated loop/ record, newest first, inside the same index budget. A hand-back that
+    // a map/ line names is reached one hop out through that map, so listing it here would be a
+    // second route to the same file; one that no map names had no route at all. Group 1 rather
+    // than interleaved with loop/ by date, because the set is bounded by what the maps miss (64 at
+    // 9041faf9) while dated loop/ grows every lap; interleaved, the older ones would be the first
+    // the window drops, and they are exactly the ones nothing else reaches.
+    let unmapped = unmapped_handbacks(&root);
+    let handbacks_unmapped = unmapped.len();
+    for f in &unmapped {
+        let Ok(body) = fs::read_to_string(f) else { continue };
+        let name = f.file_name().and_then(|x| x.to_str()).unwrap_or("?").to_string();
+        let label = format!("handback/{name}");
+        let line = index_entry_line(&label, &body);
+        index_tier.push(IndexEntry { group: 1, date: label_date(&label), seq: index_seq, label, line });
+        index_seq += 1;
+    }
+
+    // THE MAPPED HAND-BACKS (D301 part 3), only with `handback_index` on. The unmapped ones are above, in group 1, so this pass
+    // skips them: one hand-back, one line. A mapped one is reached one hop out through its map, so it does not jump the queue: it
+    // goes in with the dated loop/ record (group 2), newest first by the date in its name, and an undated one with the undated
+    // record (group 3). The window then spends the one index budget over all of it, and its drop line counts what did not fit.
+    let mut handbacks_mapped = 0usize;
+    let mut handback_mapped_lines: Vec<String> = Vec::new();
+    if handback_index() {
+        for f in top_level_handbacks(&root) {
+            if unmapped.contains(&f) { continue; }
+            let Ok(body) = fs::read_to_string(&f) else { continue };
+            let name = f.file_name().and_then(|x| x.to_str()).unwrap_or("?").to_string();
+            let label = format!("handback/{name}");
+            let line = index_entry_line(&label, &body);
+            let date = label_date(&label);
+            let group = if date.is_some() { 2 } else { 3 };
+            handbacks_mapped += 1;
+            handback_mapped_lines.push(line.clone());
+            index_tier.push(IndexEntry { group, date, seq: index_seq, label, line });
+            index_seq += 1;
         }
     }
 
@@ -7758,7 +8149,7 @@ fn corpus_shelf_at_with_index(budget: usize, index_budget: usize) -> String {
     // to actually be one.
     index_tier.sort_by(|a, b| {
         a.group.cmp(&b.group).then_with(|| match a.group {
-            1 => b.date.cmp(&a.date).then_with(|| a.label.cmp(&b.label)),
+            1 | 2 => b.date.cmp(&a.date).then_with(|| a.label.cmp(&b.label)),
             _ => a.seq.cmp(&b.seq),
         })
     });
@@ -7824,6 +8215,22 @@ fn corpus_shelf_at_with_index(budget: usize, index_budget: usize) -> String {
         ));
         s.push_str("the index tier has a byte budget of its own and this is what did not fit. The\n");
         s.push_str("line under the index names the range and the command that lists them.\n");
+    }
+    // Reported always, zero included: a count that appears only when it is non-zero cannot tell
+    // "no hand-back is unmapped" from "hand-backs were never looked at".
+    let handbacks_listed = indexed.iter().filter(|l| l.starts_with("- handback/") && !handback_mapped_lines.contains(l)).count();
+    s.push_str(&format!(
+        "{handbacks_unmapped} hand-back(s) that no map/*.md line names are indexed with the record ({handbacks_listed} listed).\n"
+    ));
+    // D301 part 3: said only when the switch is on, so the shelf with it off is today's byte for byte. The drop count is the
+    // mapped hand-backs' own, beside the window's total above, so the cost of the switch is readable on the shelf itself.
+    if handback_index() {
+        let mapped_listed = indexed.iter().filter(|l| handback_mapped_lines.contains(l)).count();
+        s.push_str(&format!(
+            "handback_index is on: {handbacks_mapped} hand-back(s) a map/*.md line names are indexed with the dated record \
+             ({mapped_listed} listed, {} dropped by the index window).\n",
+            handbacks_mapped - mapped_listed
+        ));
     }
     s.push_str(&librarian_window_line(&window_rule, &window_delivered, librarian_leftover));
     if !indexed.is_empty() {
@@ -7898,6 +8305,391 @@ fn librarian_shelf_room(head_len: usize, floor_len: usize) -> usize {
         .saturating_sub(head_len.saturating_add(floor_len))
 }
 
+/// What the seat's own windowed notes may spend on the LIGHT shelf. Sized to the largest single recent note
+/// (`librarian/2026-10-06.desktop.md`, 22,370 bytes on 2026-10-09), so a day's note rides whole; LEDGER.md (80,142) never fits
+/// and is named by path, as it is under today's budget too.
+const LIGHT_NOTES_CAP: usize = 24_000;
+
+/// THE LIGHT SHELF (D277 part 6, L1 + L2; `gates_mode` light only). Today's shelf is a WALK FILLED TO THE CAP: the bodies get
+/// whatever the head and the index leave (`librarian_shelf_room`), so shrinking the index alone would only re-spend the bytes on
+/// the next system files in walk order (see LIBRARIAN_INDEX_BUDGET's comment). This one is a FIXED SET, not a budget:
+///   CARRIED  every card (the instruments, ROOM; on 2026-10-09 the cap already reached nothing but cards), and the seat's own
+///            notes in the window (`librarian_note_is_carried`), newest first, whole, while they fit LIGHT_NOTES_CAP.
+///   INDEXED  BY DIRECTORY, not by file: one line per directory the strict walk visits, with its count, the newest file written
+///            and the command that lists it. Nothing else is read into the shell however much room is left, so nothing backfills.
+/// This narrows the keeper's 2026-08-24 cut ("the system is carried; the record is indexed", the comment at `order` above) to
+/// "the cards are carried", which is what the cap had already made true. It goes to the keeper with the flip.
+fn librarian_shelf_light() -> String {
+    match room_master_path().parent() {
+        Some(root) => librarian_shelf_light_at(root, chrono::Local::now().date_naive()),
+        None => String::new(),
+    }
+}
+
+/// The directories the light shelf indexes, `""` being the room root: the strict walk's `order` table, cards aside (they ride
+/// whole). A directory a room does not have (the consumer ships no map/ or librarian/) is skipped, never listed.
+const LIGHT_SHELF_DIRS: [&str; 9] = ["", "record", "memory", "librarian", "spread", "research", "map", "journal", "loop"];
+
+fn librarian_shelf_light_at(root: &Path, today: chrono::NaiveDate) -> String {
+    let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+    let mut carried: Vec<(String, String)> = Vec::new();
+    let mut cards: Vec<PathBuf> = Vec::new();
+    collect_md(&root.join("cards"), true, &mut cards);
+    cards.sort();
+    for f in &cards {
+        if let Ok(body) = fs::read_to_string(f) {
+            carried.push((rel(f), body));
+        }
+    }
+    let n_cards = carried.len();
+    // The window: dated notes newest first, then README.md / LEDGER.md (which the window rule carries outside the date).
+    let mut notes: Vec<PathBuf> = Vec::new();
+    collect_md(&root.join("librarian"), false, &mut notes);
+    notes.retain(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| librarian_note_is_carried(n, today)));
+    notes.sort_by_key(|p| {
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        (librarian_note_date(&name).is_none(), std::cmp::Reverse(name))
+    });
+    let (mut spent, mut over): (usize, Vec<(PathBuf, usize)>) = (0, Vec::new());
+    for f in notes {
+        let Ok(body) = fs::read_to_string(&f) else { continue };
+        if spent + body.len() <= LIGHT_NOTES_CAP {
+            spent += body.len();
+            carried.push((rel(&f), body));
+        } else {
+            over.push((f, body.len()));
+        }
+    }
+    let mut s = String::from("\n\n---\n\n# THE SHELF (light: gates_mode light)\n\n");
+    s.push_str(&format!(
+        "{} file(s) carried in full: the {n_cards} cards (the instruments) and {} of your own notes in the window (today and \
+         yesterday, plus README.md and LEDGER.md by the window rule, while they fit {LIGHT_NOTES_CAP} bytes).\n\
+         EVERYTHING ELSE IS INDEXED BY DIRECTORY below, not by file: the record (journal/, loop/, map/) and the other system \
+         tiers alike. Nothing is deleted or truncated; `ls` and `grep` reach every file, and a file you cite is a file you opened.\n\
+         attic/ is excluded on purpose -- raw archive, never a daily cue (law 3).\n",
+        carried.len(),
+        carried.len() - n_cards
+    ));
+    if !over.is_empty() {
+        s.push_str("\nYour notes in the window that did not fit, by path:\n");
+        for (f, n) in &over {
+            s.push_str(&format!("- `{}` ({n} bytes)\n", f.display()));
+        }
+    }
+    s.push_str("\n## BY DIRECTORY -- open these by path\n\n");
+    // D301 part 3: handback/ is one more directory line with `handback_index` on, counted at the TOP LEVEL only, so an
+    // `_evidence/` folder's `.md` is neither counted nor named as the newest. Off, the list is LIGHT_SHELF_DIRS exactly.
+    for dir in LIGHT_SHELF_DIRS.into_iter().chain(handback_index().then_some("handback")) {
+        let d = if dir.is_empty() { root.to_path_buf() } else { root.join(dir) };
+        if !d.is_dir() { continue; }
+        let mut files: Vec<PathBuf> = Vec::new();
+        collect_md(&d, !dir.is_empty() && dir != "handback", &mut files);
+        let newest = files
+            .iter()
+            .filter_map(|f| fs::metadata(f).and_then(|m| m.modified()).ok().map(|t| (t, f)))
+            .max_by_key(|(t, _)| *t)
+            .map(|(_, f)| format!(", newest written `{}`", rel(f)))
+            .unwrap_or_default();
+        s.push_str(&format!(
+            "- `{}` -- {} .md file(s){}{newest}. List: `ls \"{}\"`\n",
+            d.display(),
+            files.len(),
+            if dir.is_empty() { " at the top level (BOOT is above)" } else if dir == "handback" { " at the top level" } else { "" },
+            d.display()
+        ));
+    }
+    s.push_str(&format!("\nSearch all of it: `grep -rl \"<term>\" \"{}\"`\n", root.display()));
+    for (label, body) in carried {
+        s.push_str(&format!("\n\n## {label}\n\n{body}\n"));
+    }
+    s
+}
+
+/// D277 part 6 (C): the light intake's rows. They read the live room on this machine, as the shelf tests beside them do.
+#[cfg(test)]
+mod intake_light_tests {
+    use super::*;
+
+    /// D454: the bytes of the consumer's fork note inside an intake, 0 when it carries none (every dev tree). The note arrives once, either inside
+    /// the room's BOOT (FORK_MARKER through FORK_END, inclusive) or through `fork_section` (FORK_END stripped, followed by its "---" separator).
+    fn fork_span(s: &str) -> usize {
+        let Some(at) = s.find(FORK_MARKER) else { return 0 };
+        assert!(!s[at + FORK_MARKER.len()..].contains(FORK_MARKER), "the fork note rides twice in one intake");
+        match s[at..].find(FORK_END) {
+            Some(len) => len + FORK_END.len(),
+            None => s[at..].find("\n\n---\n\n").map(|len| len + "\n\n---\n\n".len()).unwrap_or(s.len() - at),
+        }
+    }
+
+    #[test]
+    fn fork_span_measures_the_note_in_either_form_and_nothing_without_one() {
+        assert_eq!(fork_span("the room, and no note"), 0, "a dev intake carries no fork note");
+        let inline = format!("before\n{FORK_MARKER} the note\n{FORK_END}\nafter");
+        assert_eq!(fork_span(&inline), format!("{FORK_MARKER} the note\n{FORK_END}").len(), "inside the room's BOOT: marker through end, inclusive");
+        let cut = format!("before\n{FORK_MARKER} the note\n\n---\n\nafter");
+        assert_eq!(fork_span(&cut), format!("{FORK_MARKER} the note\n\n---\n\n").len(), "through fork_section: marker through its separator");
+    }
+
+    /// Sets the test's mode for this thread and puts it back to off on drop, even when an assertion fails.
+    struct Mode;
+    impl Mode {
+        fn light(on: bool) -> Self {
+            TEST_INTAKE_LIGHT.with(|m| m.set(on));
+            Mode
+        }
+    }
+    impl Drop for Mode {
+        fn drop(&mut self) {
+            TEST_INTAKE_LIGHT.with(|m| m.set(false));
+        }
+    }
+
+    /// Every backticked span that is an absolute path (a drive letter or a leading slash). Commands (`ls "..."`) are not paths.
+    fn abs_paths(s: &str) -> Vec<String> {
+        s.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|p| {
+                let b = p.as_bytes();
+                (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')) || p.starts_with('/')
+            })
+            .map(String::from)
+            .collect()
+    }
+
+    /// The pane's intake as `intake_with_map` composes it, for pane C's own map, without its letter lookup (which can persist a letter).
+    fn pane_intake(light: bool) -> String {
+        let own = fs::read_to_string(own_map_path("C")).ok();
+        let reserve = map_reserve(own.as_deref());
+        let _m = Mode::light(light);
+        let mut brief = assemble_intake_within(reserve);
+        if let Some(own) = own.as_deref() {
+            let allowance = map_allowance_mode(brief.len(), reserve, light);
+            brief.push_str(&map_section(own, &own_map_path("C"), allowance.saturating_sub(MAP_SECTION_OVERHEAD)).1);
+        }
+        brief
+    }
+
+    fn card_texts() -> Vec<(String, String)> {
+        let root = room_master_path().parent().expect("room root").to_path_buf();
+        let mut cards = Vec::new();
+        collect_md(&root.join("cards"), true, &mut cards);
+        cards.iter().map(|f| (f.display().to_string(), fs::read_to_string(f).expect("card"))).collect()
+    }
+
+    #[test]
+    fn the_switch_is_the_gates_key_and_absent_is_strict() {
+        for raw in ["", "{ not json", "{}", r#"{"data_dir":"x"}"#, r#"{"gates_mode":"strict"}"#, r#"{"gates_mode":"lite"}"#, r#"{"gates_mode":true}"#] {
+            assert!(!intake_light_from(raw), "{raw} must leave the intake as today's");
+        }
+        for raw in [r#"{"gates_mode":"light"}"#, r#"{"gates_mode":" Light "}"#, "\u{feff}{\"gates_mode\":\"LIGHT\"}"] {
+            assert!(intake_light_from(raw), "{raw} is the light key");
+        }
+        let _m = Mode::light(false);
+        assert!(!intake_light(), "off is the default under test");
+    }
+
+    /// Key absent: the librarian's intake is the strict composition exactly, head then the budgeted walk. (The cross-commit
+    /// byte comparison against 9b5f40ba is `dump_intakes_for_measure` below, run on both trees; the hand-back has the result.)
+    #[test]
+    fn key_absent_the_librarian_intake_is_todays() {
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _m = Mode::light(false);
+        let head = librarian_intake_head().expect("head");
+        let today = format!("{head}{}", librarian_shelf(head.len()));
+        assert_eq!(librarian_intake().expect("intake"), today);
+    }
+
+    #[test]
+    fn key_absent_the_pane_intake_is_todays() {
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _m = Mode::light(false);
+        let i = assemble_intake_within(8_000);
+        assert!(!i.contains("(gates_mode light)"), "a strict intake carries no light section");
+        let curated = data_dir().join("resonance").join("atoms.jsonl").is_file() && read_curation().is_some_and(|c| !c.topics.is_empty());
+        assert!(!curated || i.contains("# THE MEMORY — topic map"), "the strict memory section is gone");
+    }
+
+    /// Light: under the target, with every card and the room still carried, and no per-file index.
+    #[test]
+    fn light_the_librarian_intake_is_under_target_with_the_cards_and_the_room() {
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let strict = {
+            let _m = Mode::light(false);
+            librarian_intake().expect("intake")
+        };
+        let _m = Mode::light(true);
+        let i = librarian_intake().expect("intake");
+        let boot = fs::read_to_string(room_master_path()).expect("BOOT");
+        eprintln!("LIBRARIAN INTAKE strict {} B, light {} B", strict.len(), i.len());
+        assert_eq!(i.matches(boot.as_str()).count(), 1, "the room rides once, whole");
+        assert!(i.contains("Cite, do not recollect"), "the brief rides (reworded by D277 B's rule draft (1cff0c86..fe232323); the rule is kept)");
+        for (path, text) in card_texts() {
+            assert!(i.contains(text.as_str()), "card {path} is not carried whole");
+        }
+        assert!(!i.contains("## NOT CARRIED -- open these by path"), "the per-file index is still there");
+        // THE BOUND IS THE STRUCTURE: the head, every card, at most LIGHT_NOTES_CAP of the seat's own notes, and the shelf's own
+        // header and directory lines. Nothing else can ride, whatever is on disk. (Measured 2026-10-09: 110,038 B on today's brief,
+        // README.md riding by the window rule; ~104.5 KB with B's LIBRARIAN draft. The draft's ~102 KB had left README.md out.)
+        let head = librarian_intake_head().expect("head").len();
+        let cards: usize = card_texts().iter().map(|(_, t)| t.len()).sum();
+        assert!(i.len() <= head + cards + LIGHT_NOTES_CAP + 6_000, "light librarian intake is {} B over head {head} + cards {cards} + notes cap", i.len());
+        assert!(i.len() + 25_000 <= strict.len(), "light {} B is not ~25 KB+ under strict {} B", i.len(), strict.len());
+    }
+
+    #[test]
+    fn light_the_pane_intake_is_under_target_with_the_cards_and_the_room() {
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let strict = pane_intake(false);
+        let light = pane_intake(true);
+        eprintln!("PANE INTAKE strict {} B, light {} B", strict.len(), light.len());
+        let boot = fs::read_to_string(room_master_path()).expect("BOOT");
+        let (body, _) = split_pointer_tail(&boot);
+        assert!(light.contains(body), "the room rides");
+        for (path, text) in card_texts() {
+            if strict.contains(text.as_str()) {
+                assert!(light.contains(text.as_str()), "card {path} rides strict but not light");
+            }
+        }
+        assert!(!light.contains("## The live edge"), "the live-edge claims still ride");
+        assert!(!light.contains("# THE MEMORY — topic map"), "the topic summaries still ride");
+        // D313 (E): THE BOUND IS SPLIT, because one byte total over live files was wrong by design. Under light the own-map
+        // allowance is `a.min(reserve)` (map_allowance_mode) and `reserve` is the map's NEWEST entry plus its wrapper, so the
+        // intake grew with whatever entry a seat last wrote: the old `light.len() <= 95_000` (measured on 10-09 data) went red at
+        // 95,693 B on C's long D311 entry while the product was right. So: the REST (everything before the map section) under a
+        // fixed bound, and the MAP SECTION under what the design allows it, `reserve + MAP_SECTION_OVERHEAD`.
+        // The rest's bound: measured 85,472 B on 2026-10-12 (main 894cd138, pane C's map), plus a 2,528 B margin for edits to
+        // the room and the briefs. Under light the optional seat is capped (LIGHT_OPTIONAL_CAP), so the rest does not grow
+        // with the map.
+        const LIGHT_PANE_REST_MAX: usize = 88_000;
+        let own = fs::read_to_string(own_map_path("C")).ok();
+        let reserve = map_reserve(own.as_deref());
+        let rest_at = |r: usize, light: bool| {
+            let _m = Mode::light(light);
+            assemble_intake_within(r)
+        };
+        let rest = rest_at(reserve, true);
+        assert!(light.starts_with(rest.as_str()), "the light intake is the rest followed by the map section");
+        let map_len = light.len() - rest.len();
+        eprintln!("PANE INTAKE light rest {} B, map section {map_len} B, reserve {reserve} B", rest.len());
+        // D454 (B; the librarian ruled (a) with a ceiling): THE FORK NOTE IS SET ASIDE, as the map section is, and held under its own bound. A
+        // consumer's BOOT carries the fork note by design (brief/frag-fork.md, the one registered modification); a dev tree carries none, so
+        // here the fork span is 0 and this row is what it was. Measured in the D454 consumer: rest 90,654 B = 86,769 B + a 3,885 B fork note,
+        // against LIGHT_PANE_REST_MAX (set on the dev intake, before any consumer ran it). The ceiling is the measured note plus ~16%.
+        const FORK_SECTION_MAX: usize = 4_500;
+        let fork = fork_span(&rest);
+        eprintln!("PANE INTAKE fork note {fork} B (set aside; 0 in a dev tree)");
+        assert!(fork <= FORK_SECTION_MAX, "the fork note in the light pane intake is {fork} B, over its own ceiling {FORK_SECTION_MAX}");
+        assert!(rest.len() - fork <= LIGHT_PANE_REST_MAX, "light pane intake without its map section and fork note is {} B, over {LIGHT_PANE_REST_MAX}", rest.len() - fork);
+        assert!(map_len <= reserve + MAP_SECTION_OVERHEAD, "the light map section is {map_len} B, over reserve {reserve} + {MAP_SECTION_OVERHEAD}");
+        // THE ~14 KB ROW, at a FIXED reserve, for the same cause. Strict's optional seat shrinks byte for byte as the reserve
+        // grows (optional_budget) while light's stays at its cap, so the whole-intake gap closed with C's long entry: on
+        // 2026-10-12 light 96,544 B against strict 104,900 B, rests 85,472 against 98,359 at reserve 11,651. The saving the row
+        // states is the light rest's, so it is measured at the floor every non-empty map reserves (SHELL_MAP_FLOOR).
+        // D454: the fork note is set aside on the LIGHT side here too. Strict is assembled to a budget, so in a consumer the note displaces strict's
+        // optional seat (strict floor 100,465 -> 100,877 B, +412) while light carries it on top of its fixed set (86,240 -> 90,654 B, +4,414). The
+        // saving this row states is light's own; a dev tree has no note, so this is the row it was.
+        let light_floor_rest = rest_at(SHELL_MAP_FLOOR, true);
+        let fork_floor = fork_span(&light_floor_rest);
+        // D454 (P §4.7): the span set aside HERE is bound too, not only the rest row's. It is the same note at another reserve, so it must equal
+        // the rest row's measure, and it sits under the same ceiling; an inflated floor-row span would otherwise buy this row its 14 KB unseen.
+        assert_eq!(fork_floor, fork, "the fork note set aside at the floor reserve ({fork_floor} B) is not the one set aside at the seat's reserve ({fork} B)");
+        assert!(fork_floor <= FORK_SECTION_MAX, "the fork note at the floor reserve is {fork_floor} B, over its own ceiling {FORK_SECTION_MAX}");
+        let (light_floor, strict_floor) = (light_floor_rest.len() - fork_floor, rest_at(SHELL_MAP_FLOOR, false).len());
+        eprintln!("PANE INTAKE rests at the floor reserve: light {light_floor} B (fork note set aside), strict {strict_floor} B");
+        assert!(light_floor + 14_000 <= strict_floor, "at the floor reserve, light {light_floor} B is not ~14 KB+ under strict {strict_floor} B");
+    }
+
+    #[test]
+    fn light_every_pointer_resolves_to_a_file_that_exists() {
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let shelf = librarian_shelf_light();
+        let index = shelf.split("\n\n## cards/").next().unwrap_or("");
+        let atoms = data_dir().join("resonance").join("atoms.jsonl");
+        let topics = read_curation().map(|c| c.dir);
+        let memory = memory_pointer(&atoms, 0, topics.as_deref());
+        let paths: Vec<String> = abs_paths(index).into_iter().chain(abs_paths(&memory)).collect();
+        // THE FLOOR IS WHAT THIS ROOM HAS, never a bare number: every LIGHT_SHELF_DIRS directory present here, the atoms master,
+        // and the topics directory when it exists. The workshop lists 9 + 2; the consumer, which ships no map/ or librarian/,
+        // 7 + 1 (D277 parity, B, 2026-10-10). Each expected pointer must be in the list, so an empty list cannot pass.
+        let root = room_master_path().parent().expect("room root").to_path_buf();
+        let mut expected: Vec<PathBuf> = LIGHT_SHELF_DIRS
+            .iter()
+            .map(|d| if d.is_empty() { root.clone() } else { root.join(d) })
+            .filter(|d| d.is_dir())
+            .collect();
+        expected.push(atoms.clone());
+        expected.extend(topics.filter(|d| d.is_dir()));
+        assert!(expected.len() >= 3, "the room root, one indexed directory and the atoms master at least: {expected:?}");
+        for e in &expected {
+            let e = e.display().to_string();
+            assert!(paths.contains(&e), "expected pointer `{e}` is on neither the shelf nor the memory section, found {paths:?}");
+        }
+        for p in paths {
+            assert!(Path::new(&p).exists(), "pointer `{p}` names nothing on this machine");
+        }
+    }
+
+    /// THE BACKFILL ROW, on a corpus built for it: a 200 KB system file, a record file, an 80 KB LEDGER and a note over the cap.
+    /// None of them is read into the shell however much room is left; the cards and the note that fits are.
+    #[test]
+    fn light_the_shelf_carries_a_fixed_set_and_never_backfills() {
+        let root = std::env::temp_dir().join(format!("light-shelf-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["cards", "librarian", "record", "loop"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
+        fs::write(root.join("cards").join("a.md"), "CARD-A body").unwrap();
+        fs::write(root.join("cards").join("b.md"), "CARD-B body").unwrap();
+        fs::write(root.join("librarian").join("2026-10-10.md"), "N".repeat(LIGHT_NOTES_CAP + 1)).unwrap();
+        fs::write(root.join("librarian").join("2026-10-09.md"), "YESTERDAY-NOTE").unwrap();
+        fs::write(root.join("librarian").join("2026-10-01.md"), "OLD-NOTE").unwrap();
+        fs::write(root.join("librarian").join("LEDGER.md"), "L".repeat(80_000)).unwrap();
+        fs::write(root.join("ASK.md"), "SYSTEM-FILE ".repeat(20_000)).unwrap();
+        fs::write(root.join("record").join("r.md"), "RECORD-BODY").unwrap();
+        fs::write(root.join("loop").join("x.md"), "LOOP-BODY").unwrap();
+        let s = librarian_shelf_light_at(&root, today);
+        for carried in ["CARD-A body", "CARD-B body", "YESTERDAY-NOTE"] {
+            assert!(s.contains(carried), "{carried} must ride");
+        }
+        for never in ["SYSTEM-FILE", "RECORD-BODY", "LOOP-BODY", "OLD-NOTE", "NNNNNNNNNN", "LLLLLLLLLL"] {
+            assert!(!s.contains(never), "{never} was read into the light shelf");
+        }
+        assert!(s.contains("2026-10-10.md") && s.contains("LEDGER.md"), "the window notes over the cap are named by path");
+        assert!(s.len() < 6_000, "the light shelf is {} B on a corpus of ~400 KB", s.len());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn light_caps_hold_whatever_the_brief_frees_and_strict_is_unchanged() {
+        for core in [0usize, 20_000, 40_000, 58_000, 70_000, 200_000] {
+            for reserve in [0usize, 8_000, 36_000] {
+                assert_eq!(optional_budget_mode(core, reserve, false), optional_budget(core, reserve));
+                assert!(optional_budget_mode(core, reserve, true) <= LIGHT_OPTIONAL_CAP);
+                assert_eq!(map_allowance_mode(core, reserve, false), map_allowance(core));
+                assert!(map_allowance_mode(core, reserve, true) <= reserve);
+            }
+        }
+    }
+
+    /// MEASUREMENT, not a gate: writes the strict and light librarian and pane intakes to $INTAKE_DUMP_DIR, so the strict ones can
+    /// be compared byte for byte with the same dump taken on the base tree, and the light ones measured with the census commands.
+    #[test]
+    #[ignore]
+    fn dump_intakes_for_measure() {
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let out = PathBuf::from(std::env::var("INTAKE_DUMP_DIR").expect("INTAKE_DUMP_DIR"));
+        fs::create_dir_all(&out).unwrap();
+        for light in [false, true] {
+            let _m = Mode::light(light);
+            let tag = if light { "light" } else { "strict" };
+            fs::write(out.join(format!("librarian.{tag}.md")), librarian_intake().expect("intake")).unwrap();
+            fs::write(out.join(format!("pane-C.{tag}.md")), pane_intake(light)).unwrap();
+        }
+    }
+}
+
 /// The Librarian's intake. Its brief FIRST, then the room -- the order matters: this seat needs to
 /// know what it is for before it reads what it is holding, or it starts working on the contents.
 ///
@@ -7907,6 +8699,11 @@ fn librarian_shelf_room(head_len: usize, floor_len: usize) -> usize {
 /// looking like success.
 fn librarian_intake() -> Option<String> {
     let mut s = librarian_intake_head()?;
+    // D277 part 6: the light shelf is a fixed set, not a walk filled to the cap (`librarian_shelf_light`). Strict is untouched below.
+    if intake_light() {
+        s.push_str(&librarian_shelf_light());
+        return Some(s);
+    }
     let head = s.len();
     s.push_str(&librarian_shelf(head));
     Some(s)
@@ -8048,6 +8845,9 @@ fn spawn_third_place(
     let session = spawn_claude_pane(app.clone(), THIRD_PLACE_SID.to_string(), cwd.clone(), resume, true)?;
     start_tailer(app, THIRD_PLACE_SID.to_string(), cwd.clone(), cost.0.clone(), board.0.clone());
     insert_pane(&panes, THIRD_PLACE_SID.to_string(), session);
+    // D423 part 4 (1): the Third Place holds its letter in the registry like any pane, so no sibling is handed the letter the UI
+    // shows for it. A letter is a NAME, not an address: it stays out of PaneNames below, and stays unaddressable.
+    let _ = third_place_letter_at_open();
     roles.0.lock().unwrap().insert(THIRD_PLACE_SID.to_string(), "third_place".to_string());
     // deliberately NOT inserted into PaneNames: an unaddressable seat needs no address
     Ok(SiblingInfo { pane: THIRD_PLACE_SID.to_string(), cwd, role: "third_place".to_string() })
@@ -9124,9 +9924,19 @@ fn pty_kill(panes: State<Panes>, sandboxes: State<PaneSandboxes>, pane: String) 
 #[tauri::command]
 fn pty_reopen(app: AppHandle, panes: State<Panes>, pane: String, cwd: String) -> Result<(), String> {
     let resolved_cwd = if cwd.trim().is_empty() { home() } else { cwd };
-    let session = spawn_claude_pane(app, pane.clone(), resolved_cwd, true, true)?;
-    insert_pane(&panes, pane, session);
+    let session = spawn_claude_pane(app.clone(), pane.clone(), resolved_cwd, true, true)?;
+    // D424 (P items 2, 5): the held messages wait for THIS child, and once it is in, the dead child's exit and its last
+    // ready stamp stop counting for the pane
+    app.state::<Inbox>().restart_wait(&pane, Instant::now());
+    insert_pane(&panes, pane.clone(), session);
+    new_session_for(&pane);
     Ok(())
+}
+
+/// D424: a new session is in for this pane (the automatic reopen or the ↻): drop its exit, record the reopen time.
+fn new_session_for(pane: &str) {
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    pane_exit::on_new_session(&mut harvest_guard::recover(pane_exits().lock()), &mut harvest_guard::recover(reopened_at().lock()), pane, now_ms);
 }
 
 /// D143: the exits this app run has seen, by pane, keyed to the child's pid (pane_exit::liveness reads it), and the
@@ -9135,6 +9945,61 @@ static PANE_EXITS: std::sync::OnceLock<Mutex<HashMap<String, pane_exit::PaneExit
 static AUTO_REOPENED: std::sync::OnceLock<Mutex<HashSet<String>>> = std::sync::OnceLock::new();
 fn pane_exits() -> &'static Mutex<HashMap<String, pane_exit::PaneExit>> {
     PANE_EXITS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// D424: the panes whose one automatic reopen is under way (the gate holds their messages rather than refusing them),
+/// and when each pane was last reopened automatically (a ready stamp older than that is the dead child's).
+static REOPENING: std::sync::OnceLock<Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+static REOPENED_AT: std::sync::OnceLock<Mutex<HashMap<String, u64>>> = std::sync::OnceLock::new();
+fn reopening() -> &'static Mutex<HashSet<String>> {
+    REOPENING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+fn reopened_at() -> &'static Mutex<HashMap<String, u64>> {
+    REOPENED_AT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// D424: what kind of seat this is for reopening, and the folder it resumes in. A fixed seat resumes in its own folder; a
+/// committee pane in the folder its kept-pane record holds (the record `resume_pane` restores it from at launch); a
+/// committee pane with no record, and every human pane, has nowhere the app may resume it and is left to the ↻.
+fn reopen_seat(fixed_cwd: Option<String>, role: &str, kept: &[KeptPane], pane: &str) -> (pane_exit::Seat, Option<String>) {
+    if let Some(cwd) = fixed_cwd {
+        return (pane_exit::Seat::Fixed, Some(cwd));
+    }
+    match kept.iter().find(|k| k.pane == pane) {
+        Some(k) if role == "committee" && !k.cwd.trim().is_empty() => (pane_exit::Seat::Committee, Some(k.cwd.clone())),
+        _ => (pane_exit::Seat::Human, None),
+    }
+}
+
+/// D424: the exit half of the delivery gate for this pane, from the exit record, the reopens under way and the pid the
+/// map holds now.
+fn exit_gate_for(app: &AppHandle, pane: &str) -> pane_exit::ExitGate {
+    let current_pid = app.try_state::<Panes>().and_then(|p| harvest_guard::recover(p.0.lock()).get(pane).and_then(|s| s.pid));
+    pane_exit::exit_gate(&harvest_guard::recover(pane_exits().lock()), &harvest_guard::recover(reopening().lock()), pane, current_pid)
+}
+
+/// D424: a message refused in the queue is told to its sender, read from the app's own provenance label. The note is
+/// queued like any message, so it waits for the sender's own ready signal, and it carries no sender of its own.
+fn tell_refused_sender(app: &AppHandle, pane: &str, text: &str, e: &pane_exit::PaneExit, label: &str) {
+    let who = match pane_exit::refusal_recipient(text) {
+        pane_exit::Recipient::Tell(who) => who,
+        pane_exit::Recipient::NotTold(letter) => {
+            chair_audit(app, format!("REFUSAL NOT TOLD -> pane:{letter}: a lettered sender is not routed to until its mount letter maps to a pane id (the letters are crossed today, D423); the REFUSED row above, for {}, is the record", short_id(pane)));
+            return;
+        }
+        pane_exit::Recipient::Nobody => return,
+    };
+    let to = match resolve_pane(&app.state::<Panes>(), &app.state::<PaneNames>(), who) {
+        Ok(t) => t,
+        Err(err) => {
+            chair_audit(app, format!("REFUSAL NOT TOLD -> {who}: the sender of the refused message to {} was not found ({err}); the board row above is the only record", short_id(pane)));
+            return;
+        }
+    };
+    let note = pane_exit::refusal_notice(short_id(pane), e, label);
+    let preview = format!("refused: your message to {}", short_id(pane));
+    let depth = app.state::<Inbox>().push(&to, note, preview.clone(), Instant::now());
+    chair_audit(app, format!("QUEUED -> {} ({} waiting, the app's refusal note): {}", short_id(&to), depth, preview));
 }
 
 /// The fixed seats, and the folder each one runs in — the same folders their spawn_* commands use.
@@ -9156,17 +10021,23 @@ fn on_pane_exit(app: &AppHandle, pane: &str, pid: Option<u32>, code: Option<u32>
     let still_ours = pid.is_some()
         && LEAVE_PHASE.load(Ordering::SeqCst) == LEAVE_IDLE
         && app.try_state::<Panes>().is_some_and(|p| harvest_guard::recover(p.0.lock()).get(pane).is_some_and(|s| s.pid == pid));
-    let cwd = fixed_seat_cwd(pane);
+    let role = pane_role(app, pane);
+    let (seat, cwd) = reopen_seat(fixed_seat_cwd(pane), &role, &read_kept(), pane);
     let action = pane_exit::decide(
         still_ours,
-        cwd.is_some(),
+        seat,
         pane,
         &mut harvest_guard::recover(AUTO_REOPENED.get_or_init(|| Mutex::new(HashSet::new())).lock()),
     );
-    let Some(row) = pane_exit::exited_row(short_id(pane), &pane_role(app, pane), code, action) else {
+    let Some(row) = pane_exit::exited_row(short_id(pane), &role, code, action) else {
         return;
     };
     let at_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    // D424: a reopen is marked under way BEFORE the exit is recorded, so the gate never sees this exit without it and
+    // refuses a message that should wait for the reopened child.
+    if action == pane_exit::ExitAction::ReopenOnce {
+        harvest_guard::recover(reopening().lock()).insert(pane.to_string());
+    }
     harvest_guard::recover(pane_exits().lock()).insert(pane.to_string(), pane_exit::PaneExit { pid, code, at_ms });
     plog(&row);
     chair_audit(app, row);
@@ -9181,13 +10052,22 @@ fn on_pane_exit(app: &AppHandle, pane: &str, pid: Option<u32>, code: Option<u32>
     }
     let Some(cwd) = cwd else { return };
     let who = if pane == THIRD_PLACE_SID { "the Third Place".to_string() } else { short_id(pane).to_string() };
-    match spawn_claude_pane(app.clone(), pane.to_string(), cwd, true, true) {
+    harvest_guard::recover(reopened_at().lock()).insert(pane.to_string(), at_ms);
+    let reopened = spawn_claude_pane(app.clone(), pane.to_string(), cwd, true, true);
+    match reopened {
         Ok(session) => {
+            // the messages held across the reopen wait for THIS child from now; restarted before the new pid lands, so
+            // no drain tick can read the new child open with the old clock
+            app.state::<Inbox>().restart_wait(pane, Instant::now());
             insert_pane(&app.state::<Panes>(), pane.to_string(), session);
+            new_session_for(pane);
+            harvest_guard::recover(reopening().lock()).remove(pane);
             chair_audit(app, format!("pane REOPENED -> {who}: resumed the same session, once, automatically"));
             let _ = app.emit("pane-reopened", pane);
         }
         Err(e) => {
+            // the dead child is still the map's, so the next drain tick refuses what was held for it, by name
+            harvest_guard::recover(reopening().lock()).remove(pane);
             chair_audit(app, format!("pane REOPEN FAILED -> {who}: {e} — ↻ on its pane retries it by hand"));
             let _ = app.emit("pane-exit", serde_json::json!({ "pane": pane, "code": code, "action": "reopen_failed" }));
         }
@@ -9318,17 +10198,19 @@ fn dyad_spot(app: AppHandle, panes: State<Panes>, names: State<PaneNames>, board
     let preview = format!("dyad-spot -> {} ({partner_lens}-forward, catch {catch})",
         &partner[..8.min(partner.len())]);
     let queued = gate_or_queue(&app, &partner, &msg, &preview);
-    if queued.is_none() {
-        inject_to_pane(&panes, &partner, &msg)?;
-    }
+    let wrote = if queued.is_none() {
+        Ok(inject_to_pane(&panes, &partner, &msg, &app.state::<PaneEmus>())?)
+    } else {
+        Err(String::new())
+    };
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     board_push(&board.0, BoardEntry { pane: "dyad".to_string(), role: "committee".to_string(),
-        text: format!("chair spotted {} -> partner {} ({}-forward) asked to catch {}{}",
+        text: format!("chair spotted {} -> partner {} ({}-forward) asked to catch {}{}{}",
             &tid[..8.min(tid.len())], &partner[..8.min(partner.len())], partner_lens, catch,
-            if queued.is_some() { " [QUEUED — the partner was mid-turn]" } else { "" }), ts,
+            if queued.is_some() { " [QUEUED — the partner was mid-turn]" } else { "" }, submit_note(&wrote)), ts,
             ts_source: TsSource::Push });
     Ok(queued.unwrap_or_else(||
-        format!("spot delivered to partner ({partner_lens}-forward → catch {catch})")))
+        format!("spot delivered to partner ({partner_lens}-forward → catch {catch}){}", submit_note(&wrote))))
 }
 
 // Actuator plane (main.rs legitimately holds the writer; gate.rs never does): the only path that
@@ -9627,7 +10509,23 @@ fn parse_stamp(raw: &str) -> Stamp {
 }
 
 fn read_stamp(pane: &str) -> Stamp {
-    fs::read_to_string(ready_path(pane)).map(|r| parse_stamp(&r)).unwrap_or(Stamp::Absent)
+    let Ok(raw) = fs::read_to_string(ready_path(pane)) else { return Stamp::Absent };
+    gate_stamp(&raw, harvest_guard::recover(reopened_at().lock()).get(pane).copied())
+}
+
+/// D424: a stamp as the gate reads it. After an automatic reopen, a stamp written before it is the dead child's account,
+/// not the new one's, and reads as no stamp.
+fn gate_stamp(raw: &str, reopened_at_ms: Option<u64>) -> Stamp {
+    if pane_exit::stamp_predates_reopen(stamp_at_ms(raw), reopened_at_ms) {
+        return Stamp::Absent;
+    }
+    parse_stamp(raw)
+}
+
+/// When a stamp was written (its `at`), in unix ms, or None if it carries no readable time.
+fn stamp_at_ms(raw: &str) -> Option<u64> {
+    let v = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    iso_utc_ms(v.get("at")?.as_str()?)
 }
 
 /// The delivery state of a pane, as ONE value carrying its own reason.
@@ -10129,6 +11027,10 @@ struct Queued {
     /// For the board row only — never re-rendered into the pane.
     label: String,
     queued_at: Instant,
+    /// D424: what the bounded hold counts from. The moment it was queued, until its pane's one automatic reopen is done:
+    /// then the reopened child's own wait starts, so a message held across the reopen is not forced into a claude that
+    /// is still starting up. `queued_at` stays as it was, for the rows.
+    wait_from: Instant,
     /// Every composer reading taken while THIS message waited — what its forced row is built from.
     reads: Reads,
     /// WITHDRAWN: the chair cancelled this before the pane was ready for it. It is NOT removed
@@ -10190,7 +11092,7 @@ impl Inbox {
     fn push(&self, pane: &str, text: String, label: String, now: Instant) -> usize {
         let mut m = self.0.lock().unwrap();
         let q = m.entry(pane.to_string()).or_default();
-        q.push_back(Queued { text, label, queued_at: now, reads: Reads::default(), withdrawn: false });
+        q.push_back(Queued { text, label, queued_at: now, wait_from: now, reads: Reads::default(), withdrawn: false });
         q.len()
     }
     fn depth(&self, pane: &str) -> usize {
@@ -10262,6 +11164,31 @@ impl Inbox {
         Some((it.label, now.saturating_duration_since(it.queued_at)))
     }
 
+    /// D424: every message queued for a pane whose child exited with nothing reopening it, taken out so the drain can
+    /// refuse each one by name: (text, label, how long it waited, whether it had been withdrawn). Nothing for any other
+    /// gate: an open pane is the ordinary gate's, and a reopen in flight holds.
+    fn take_refused(&self, pane: &str, exit: pane_exit::ExitGate, now: Instant) -> Vec<(String, String, Duration, bool)> {
+        if !matches!(exit, pane_exit::ExitGate::Refuse(_)) {
+            return Vec::new();
+        }
+        let Ok(mut m) = self.0.lock() else { return Vec::new() };
+        m.remove(pane)
+            .map(|q| q.into_iter().map(|it| (it.text, it.label, now.saturating_duration_since(it.queued_at), it.withdrawn)).collect())
+            .unwrap_or_default()
+    }
+
+    /// D424: the pane's one automatic reopen is done. Every message waiting for it starts its bounded hold again from now,
+    /// so the reopened child is waited for on its own terms.
+    fn restart_wait(&self, pane: &str, now: Instant) {
+        if let Ok(mut m) = self.0.lock() {
+            if let Some(q) = m.get_mut(pane) {
+                for it in q.iter_mut() {
+                    it.wait_from = now;
+                }
+            }
+        }
+    }
+
     /// Take the head IF the decision says it may go. Returns the message and whether it was forced.
     /// Leaves the queue untouched on HOLD — bar 4: a queued message must never be lost.
     fn take_ready(
@@ -10296,7 +11223,7 @@ impl Inbox {
         if head.withdrawn {
             return None;
         }
-        let waited = now.saturating_duration_since(head.queued_at);
+        let waited = now.saturating_duration_since(head.wait_from);
         match drain_decision(gate, box_empty, screen_idle, waited, enabled) {
             Drain::Hold => None,
             d => {
@@ -10357,9 +11284,66 @@ fn pane_state(emus: &PaneEmus, pane_id: &str) -> (PaneGate, bool, bool, Composer
     }
 }
 
+/// D309 (seat A): THE SEND TIME ON A RING. The app wrote who sent a message and never when, so a seat that read a relayed figure
+/// had no way to tell a minute-old fact from a day-old one (D307: 14 of 42 wrong beliefs came from another seat's message, and
+/// 18 of the 21 carried beliefs carried no time).
+///
+/// WHERE THE LINE GOES, and why it is a LAST line: every reader of a ring anchors on its HEAD. `reply-slot.js` classes a prompt
+/// by `^s*[(chair:|pane:|librarian:|...)`, `claim-check.js` and `blind.js` match `^[pane:X]`, `chain-status.js` pairs a
+/// ring to its receiver row by the tag plus the first 60 characters, `isSealedDispatch` reads the opening words. A leading
+/// `[sent ...]` line would make a pane ring read as a keeper message; a stamp inside the label would break every one of them. A
+/// trailing line breaks none, and it is where the app already appends its own notes (the digest at ring, the NEXT-trailer note).
+/// TEXT ONLY: no gate, no refusal, nothing a seat must do differently.
+///
+/// UTC to the second, and the local civil time as the pulse's compact stamp shows it (`pulse_stamp`).
+fn send_stamp_text(t: chrono::DateTime<chrono::Utc>) -> String {
+    format!("{} · {} local", t.format("%Y-%m-%dT%H:%M:%SZ"), pulse_stamp(chrono::DateTime::<chrono::Local>::from(t)))
+}
+
+/// The message with its send time as a final line. The text before it is untouched.
+fn with_send_stamp(msg: &str, sent: chrono::DateTime<chrono::Utc>) -> String {
+    format!("{msg}\n[sent {}]", send_stamp_text(sent))
+}
+
+/// A QUEUED message is written later than it was sent. Rewrites the final send line to say so: both times, and how long it was
+/// held. Applies only to a message whose last line is a well-formed send stamp that has not been rewritten (a keep-warm, a pull
+/// or a dyad message carries none, and is returned as it came); applying it twice changes nothing more.
+fn with_delivery_stamp(text: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    let Some((head, last)) = text.rsplit_once('\n') else { return text.to_string() };
+    let Some(inner) = last.strip_prefix("[sent ").and_then(|l| l.strip_suffix(']')) else { return text.to_string() };
+    if inner.contains(" · HELD ") || !inner.ends_with(" local") {
+        return text.to_string();
+    }
+    let Some(sent) = inner
+        .split(' ')
+        .next()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+    else {
+        return text.to_string();
+    };
+    let held = (now - sent).num_seconds().max(0);
+    format!("{head}\n[sent {inner} · HELD {held} s · delivered {}]", send_stamp_text(now))
+}
+
 /// The one call every delivery site makes before it writes. `Some(reply)` means the message was
 /// QUEUED and the caller must return that reply instead of writing; `None` means go ahead.
 fn gate_or_queue(app: &AppHandle, pane_id: &str, msg: &str, preview: &str) -> Option<String> {
+    // D424: nothing goes into an exited child. Refused at the door with the exit named, or held for the one reopen.
+    match exit_gate_for(app, pane_id) {
+        pane_exit::ExitGate::Refuse(e) => {
+            let row = pane_exit::refused_row(short_id(pane_id), &e, None, preview);
+            plog(&row);
+            chair_audit(app, row.clone());
+            return Some(row);
+        }
+        pane_exit::ExitGate::AwaitReopen => {
+            let depth = app.state::<Inbox>().push(pane_id, msg.to_string(), preview.to_string(), Instant::now());
+            chair_audit(app, format!("QUEUED -> {} ({} waiting, its child exited and its one automatic reopen is running): {}", short_id(pane_id), depth, preview));
+            return Some(format!("queued for {} — its child exited and the app is reopening it once; it delivers when the reopened pane is ready", short_id(pane_id)));
+        }
+        pane_exit::ExitGate::Open => {}
+    }
     let enabled = deliver_only_when_idle();
     let (gate, box_empty, screen_idle, _) = pane_state(&app.state::<PaneEmus>(), pane_id);
     // waited = 0 at the door, so this can only ever say Deliver or Hold here
@@ -10577,6 +11561,26 @@ fn drain_inboxes(app: &AppHandle) {
                 short_id(&pane), waited.as_secs(), label
             ));
         }
+        // D424: THE EXIT GATE, before any reading: a child that exited with nothing reopening it has every message refused
+        // by name and told to its sender; one whose reopen is running holds, and nothing is taken for it this tick.
+        let exit = exit_gate_for(app, &pane);
+        for (text, label, waited, withdrawn) in app.state::<Inbox>().take_refused(&pane, exit, Instant::now()) {
+            if withdrawn {
+                chair_audit(app, format!(
+                    "WITHDRAWN NOT DELIVERED -> {} (queued {}s ago, cancelled before this pane was ready for it): {}",
+                    short_id(&pane), waited.as_secs(), label
+                ));
+                continue;
+            }
+            let pane_exit::ExitGate::Refuse(e) = exit else { continue };
+            let row = pane_exit::refused_row(short_id(&pane), &e, Some(waited.as_secs()), &label);
+            plog(&row);
+            chair_audit(app, row);
+            tell_refused_sender(app, &pane, &text, &e, &label);
+        }
+        if exit != pane_exit::ExitGate::Open {
+            return;
+        }
         let (gate, box_empty, screen_idle, composer) = pane_state(&app.state::<PaneEmus>(), &pane);
         app.state::<Inbox>().note_reading(&pane, composer);
         if let Some((text, label, forced, reads)) = app.state::<Inbox>().take_ready_read(
@@ -10587,12 +11591,17 @@ fn drain_inboxes(app: &AppHandle) {
             Instant::now(),
             enabled,
         ) {
-            let ok = inject_to_pane(&app.state::<Panes>(), &pane, &text).is_ok();
+            // D309: a message that waited says when it was sent AND when it arrived (the send line of the three ring senders;
+            // anything else queued is returned unchanged).
+            let text = with_delivery_stamp(&text, chrono::Utc::now());
+            let wrote = inject_to_pane(&app.state::<Panes>(), &pane, &text, &app.state::<PaneEmus>());
+            let ok = wrote.is_ok();
             chair_audit(app, format!(
-                "DELIVERED -> {} {}{}: {}",
+                "DELIVERED -> {} {}{}{}: {}",
                 short_id(&pane),
                 delivery_note_with(gate, forced, Some(&reads)),
                 if ok { "" } else { " [WRITE FAILED]" },
+                submit_note(&wrote),
                 label,
             ));
             /* THE FALLBACK MUST SAY IT FIRED. A forced delivery on an UNSTAMPED pane is the
@@ -10644,13 +11653,135 @@ fn drain_inboxes(app: &AppHandle) {
     }
 }
 
-fn inject_to_pane(panes: &State<Panes>, pane_id: &str, text: &str) -> Result<(), String> {
-    let mut map = panes.0.lock().unwrap();
-    let sess = map.get_mut(pane_id).ok_or_else(|| "pane not found".to_string())?;
+/// The one write into a pane: `deliver` over the pane's PTY writer and its live screen. Every caller
+/// gets the submit check, because there is one function (D415; the reason is `deliver_pull`'s).
+fn inject_to_pane(panes: &State<Panes>, pane_id: &str, text: &str, emus: &PaneEmus) -> Result<Submit, String> {
+    deliver(
+        &mut |f| {
+            let mut map = panes.0.lock().unwrap();
+            let sess = map.get_mut(pane_id).ok_or_else(|| "pane not found".to_string())?;
+            f(&mut *sess.writer)
+        },
+        &mut || live_screen(emus, pane_id).map(|(rendered, typed, _)| (rendered, typed)),
+        &mut |d| std::thread::sleep(d),
+        text,
+    )
+}
+
+// ---------------------------------------------------------------- THE SUBMIT CHECK (D415, 2026-10-19)
+//
+// A WRITTEN MESSAGE IS NOT A SUBMITTED ONE. `inject_to_pane` pasted, waited, pressed Enter once and
+// returned Ok, and nothing checked that the Enter was taken. Every ring's "delivered" came from the
+// render check, and text sitting unsent in the composer renders too. The keeper found the librarian's
+// 14:53 ring in the Main tab's input box 38 minutes later ("it didnt auto send"), the second that day
+// (`exo_memory/loop/plan_d415_delivery_submits_2026-10-19.md`). So after the Enter the composer is
+// READ: our text gone is a submit; our text still there gets the Enter again, never the paste; text
+// that is not ours is never touched.
+
+/// How long to wait before each reading of the composer after an Enter, in order. One reading per
+/// entry, and every reading but the last may be followed by one more lone Enter, so the retries are
+/// `len() - 1`.
+///
+/// THE NUMBERS. 200 ms first: a taken Enter clears the composer within a frame or two, and the first
+/// reading should not itself be a race. Then doubling from 300 ms, because the observed cause is a TUI
+/// still digesting a paste, and a busy TUI needs longer, not more often. Three retries and 2.3 s in
+/// all: two and a half times `submit_delay_ms`'s 900 ms ceiling, the wait that was not enough on
+/// 2026-08-25, and short enough that a stuck ring's whole wait plus its render check stays well inside
+/// the MCP caller's 15 s (this runs on the actuator thread; see `RECEIPT_WAIT_MS`).
+const SUBMIT_CHECK_GAPS_MS: [u64; 4] = [200, 300, 600, 1_200];
+
+/// The submit, as the composer showed it after the Enter(s).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Submit {
+    /// The composer read empty: the Enter was taken. `retries` lone Enters followed the first.
+    Submitted { retries: u32 },
+    /// Our text was still in the composer at the last reading, after every retry. It stays there:
+    /// nothing here clears or edits a composer.
+    NotSubmitted { retries: u32 },
+    /// The composer holds text that is not ours (the keeper's typing, or a suggestion read as text).
+    /// No Enter was sent on it; that case is the inbox gate's (`gate_or_queue`), not this check's.
+    NotOurs,
+    /// No reading could decide: no screen, no composer row, or two grids that disagree.
+    Unknown,
+}
+
+/// One reading's decision. Pure, the way `submit_delay_ms` and `ring_reply` are, so every row is a
+/// unit test with no PTY.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum SubmitStep {
+    Submitted,
+    RetryEnter,
+    NotSubmitted,
+    NotOurs,
+    Unknown,
+}
+
+/// EMPTY IS A SUBMIT, and it is the composer rule's EMPTY, so a dim suggestion left behind reads empty
+/// (`typed_only`). UNREADABLE IS NEVER A SUBMIT and never gets an Enter: a key pressed on a box nobody
+/// can see is the splice the inbox exists to prevent. TEXT THAT IS NOT OURS STOPS IT, with no Enter.
+fn submit_step(reading: Composer, ours: bool, retries_sent: u32) -> SubmitStep {
+    match reading {
+        Composer::Empty => SubmitStep::Submitted,
+        Composer::Unreadable(_) => SubmitStep::Unknown,
+        Composer::HasText if !ours => SubmitStep::NotOurs,
+        Composer::HasText if (retries_sent as usize) < SUBMIT_CHECK_GAPS_MS.len() - 1 => SubmitStep::RetryEnter,
+        Composer::HasText => SubmitStep::NotSubmitted,
+    }
+}
+
+/// Is THIS message in the composer? The composer is the row `composer_row` finds and the rows under it
+/// down to the next separator rule, since a paste that wraps fills several. Ours when it holds the
+/// message's head or tail needle (the render check's own, `receipt_needle`), or, for a paste the TUI
+/// collapsed, `[Pasted text #<k> +<n> lines]` where n is the message's newline count. Measured
+/// 2026-10-19 on seat C's capture: the D415 packet, 14 newlines, showed `+14 lines`; the 12:59 heads-up,
+/// 5, showed `+5 lines`. A message too short for a needle and with no newline is never ours, so it
+/// gets no retry: unconfirmable stays unconfirmed.
+fn ours_in_box(rendered: &[String], text: &str) -> bool {
+    let Some(i) = composer_row(rendered) else { return false };
+    let end = rendered[i + 1..].iter().position(|l| is_separator_rule(l)).map_or(rendered.len(), |k| i + 1 + k);
+    let region = squeeze(&rendered[i..end].concat());
+    let (head, tail) = (receipt_needle(text), receipt_needle_tail(text));
+    if (!head.is_empty() && region.contains(&head)) || (!tail.is_empty() && region.contains(&tail)) {
+        return true;
+    }
+    let lines = text.matches('\n').count();
+    lines > 0 && pasted_placeholder_lines(&region).contains(&lines)
+}
+
+/// The `<n>` of every `[Pasted text #<k> +<n> lines]` in a squeezed region (whitespace already gone).
+fn pasted_placeholder_lines(squeezed: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for part in squeezed.split("[Pastedtext#").skip(1) {
+        let Some((k, rest)) = part.split_once('+') else { continue };
+        let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let after = &rest[n.len()..];
+        if !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()) && (after.starts_with("lines]") || after.starts_with("line]")) {
+            if let Ok(n) = n.parse() {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+/// The whole delivery over a writer, with no PTY: one bracketed paste, the wait, one Enter, then the
+/// composer read on `SUBMIT_CHECK_GAPS_MS` and a lone Enter again while our text is still there.
+///
+/// `with_writer` runs one write under the pane's lock. The paste, its wait and the first Enter go in ONE
+/// call, exactly as before this lap, so nothing the keeper types can land between them; each retried
+/// Enter goes in its own, so the lock is not held while we wait to read.
+///
+/// WHAT IS NEVER WRITTEN: a second paste (a paste APPENDS, see `unconfirmed_delivery_line`), and any key
+/// that edits the composer — no backspace, no ctrl-u, no escape. Consonance never edits the keeper's box;
+/// a message that will not submit is reported, and left where he can see it.
+fn deliver(
+    with_writer: &mut dyn FnMut(&mut dyn FnMut(&mut dyn Write) -> Result<(), String>) -> Result<(), String>,
+    read: &mut dyn FnMut() -> Option<(Vec<String>, Vec<String>)>,
+    sleep: &mut dyn FnMut(Duration),
+    text: &str,
+) -> Result<Submit, String> {
     // bracketed paste keeps the message one input (newlines and all)…
     let payload = format!("\x1b[200~{}\x1b[201~", text);
-    sess.writer.write_all(payload.as_bytes()).map_err(|e| e.to_string())?;
-    sess.writer.flush().map_err(|e| e.to_string())?;
     // …then the submit as a SEPARATE write after a gap. An Enter arriving in the same chunk as
     // the paste-end can be eaten by the TUI while it is still processing the paste — found live
     // 2026-07-27: the chair's first fan-out lodged unsubmitted in two idle panes' composers
@@ -10663,10 +11794,73 @@ fn inject_to_pane(panes: &State<Panes>, pane_id: &str, text: &str) -> Result<(),
     // work for the TUI to process before it can accept a submit, so the wait is now a function of
     // the payload. Bounded at both ends: never below the July value, never long enough to make a
     // dispatch feel hung.
-    std::thread::sleep(Duration::from_millis(submit_delay_ms(payload.len())));
-    sess.writer.write_all(b"\r").map_err(|e| e.to_string())?;
-    sess.writer.flush().map_err(|e| e.to_string())?;
-    Ok(())
+    //
+    // AND NO WAIT CLOSES IT, 2026-10-19 (D415): the wait is the first attempt, and the reading
+    // below is what says whether it worked.
+    let delay = Duration::from_millis(submit_delay_ms(payload.len()));
+    with_writer(&mut |w| {
+        w.write_all(payload.as_bytes()).map_err(|e| e.to_string())?;
+        w.flush().map_err(|e| e.to_string())?;
+        sleep(delay);
+        w.write_all(b"\r").map_err(|e| e.to_string())?;
+        w.flush().map_err(|e| e.to_string())
+    })?;
+    let mut retries = 0u32;
+    for gap in SUBMIT_CHECK_GAPS_MS {
+        sleep(Duration::from_millis(gap));
+        let (reading, ours) = match read() {
+            Some((rendered, typed)) => (composer_state(&rendered, &typed), ours_in_box(&rendered, text)),
+            None => (Composer::Unreadable(Unreadable::NoScreen), false),
+        };
+        match submit_step(reading, ours, retries) {
+            SubmitStep::Submitted => return Ok(Submit::Submitted { retries }),
+            SubmitStep::NotSubmitted => return Ok(Submit::NotSubmitted { retries }),
+            SubmitStep::NotOurs => return Ok(Submit::NotOurs),
+            SubmitStep::Unknown => {}
+            SubmitStep::RetryEnter => {
+                with_writer(&mut |w| {
+                    w.write_all(b"\r").map_err(|e| e.to_string())?;
+                    w.flush().map_err(|e| e.to_string())
+                })
+                .map_err(|e| format!("the text was written, and a retried Enter could not be: {e}"))?;
+                retries += 1;
+            }
+        }
+    }
+    // Every reading was spent and the last one did not decide (unreadable, or an Enter pressed
+    // with no reading after it): nothing is claimed.
+    Ok(Submit::Unknown)
+}
+
+/// The receipt a sender is told: the render check AND the submit check. `Received` needs both, so
+/// "delivered" can no longer be said of a message sitting in the composer, which renders too. Text
+/// still in the box is NotSubmitted whatever the render check saw. An empty box with no render is not
+/// proof (the paste may never have arrived), and a box nobody could read proves nothing either way.
+fn delivery_receipt(render: Receipt, submit: Submit) -> Receipt {
+    match (render, submit) {
+        (Receipt::NotAttempted, _) => Receipt::NotAttempted,
+        (_, Submit::NotSubmitted { .. }) => Receipt::NotSubmitted,
+        (Receipt::Received, Submit::Submitted { .. }) => Receipt::Received,
+        _ => Receipt::Unconfirmed,
+    }
+}
+
+/// What the sender and the board are told when our text is still in the receiver's input box.
+fn not_submitted_line(dest: &str) -> String {
+    format!(
+        "NOT SUBMITTED — the text is in {dest}'s input box: the Enter was not taken, after retries. \
+         Press Enter there; do NOT re-send (a second write APPENDS to what is in the box)."
+    )
+}
+
+/// A note for the rows that say DELIVERED without a render check (the drain, a pull, a dyad spot).
+fn submit_note(wrote: &Result<Submit, String>) -> &'static str {
+    match wrote {
+        Ok(Submit::NotSubmitted { .. }) => {
+            " [NOT SUBMITTED — the text is in the input box: the Enter was not taken, after retries; press Enter there, do NOT re-send]"
+        }
+        _ => "",
+    }
 }
 
 // Compose the directed message FROM the pull (never the raiser's PTY) and inject it — but only
@@ -10715,7 +11909,8 @@ fn deliver_pull(app: &AppHandle, pull: &mcp::PullRequest) -> String {
     if let Some(queued) = gate_or_queue(app, &tid, &msg, &preview) {
         return queued;
     }
-    match inject_to_pane(&panes, &tid, &msg) {
+    match inject_to_pane(&panes, &tid, &msg, &app.state::<PaneEmus>()) {
+        Ok(Submit::NotSubmitted { .. }) => not_submitted_line(short),
         Ok(_) => format!("delivered to {short}"),
         Err(e) => format!("delivery failed: {e}"),
     }
@@ -10892,6 +12087,9 @@ enum Receipt {
     Unconfirmed,
     /// Nothing was written (refused or delivery error), so there is nothing to confirm.
     NotAttempted,
+    /// D415: written, and the text is STILL IN THE RECEIVER'S INPUT BOX after every retried Enter
+    /// (`deliver`). It rendered, so the render check alone would have called it Received.
+    NotSubmitted,
 }
 
 /// Drop ANSI escape sequences so their letters (`[0m`, `[38;5;12m`) can't pollute the comparison.
@@ -11519,13 +12717,18 @@ fn keep_warm_send(app: &AppHandle, pane: &str, role: &str, idle: Duration, conte
         ));
         return;
     }
-    let ok = inject_to_pane(&app.state::<Panes>(), pane, KEEP_WARM_TEXT).is_ok();
+    let wrote = inject_to_pane(&app.state::<Panes>(), pane, KEEP_WARM_TEXT, &app.state::<PaneEmus>());
+    let ok = wrote.is_ok();
     if ok {
         if let Ok(mut m) = app.state::<KeepWarmPinged>().0.lock() {
             m.insert(pane.to_string(), Instant::now());
         }
     }
     chair_audit(app, keep_warm_row(short_id(pane), role, idle, context, ok));
+    // D415: a ping left in the box is in the keeper's way, so it gets its own row.
+    if let Ok(Submit::NotSubmitted { .. }) = wrote {
+        chair_audit(app, format!("keep-warm -> {}: {}", short_id(pane), not_submitted_line(short_id(pane))));
+    }
 }
 
 fn chair_audit(app: &AppHandle, text: String) {
@@ -11569,6 +12772,10 @@ fn chair_inject_audit_line(
                 // unreachable on the success path; rendered rather than panicked, because an audit
                 // line that can panic is an audit line that can go missing.
                 Receipt::NotAttempted => "written; receipt not checked".to_string(),
+                Receipt::NotSubmitted => {
+                    "WRITTEN BUT NOT SUBMITTED — the text is in the pane's input box; the Enter was not taken, after retries"
+                        .to_string()
+                }
             };
             format!("chair injected (chair: {chair_model}) -> {id} [{state}]: {preview}")
         }
@@ -11639,6 +12846,7 @@ fn chair_inject_exec(app: &AppHandle, target: &str, text: &str) -> String {
     // provenance is marked by the SYSTEM, not the sender — a pane must never be unsure
     // whether the chair or the human is speaking to it
     let msg = format!("[chair:MAIN] {text}");
+    let msg = with_send_stamp(&msg, chrono::Utc::now());
     // Receipt: the capture's length BEFORE the write, so only bytes that arrive after it can count
     // as this write's render. Taken before inject_to_pane, never after — the gap is the whole point.
     let cap = capture_path(&tid);
@@ -11651,9 +12859,9 @@ fn chair_inject_exec(app: &AppHandle, target: &str, text: &str) -> String {
         return queued;
     }
     let before = fs::metadata(&cap).map(|m| m.len()).unwrap_or(0);
-    let delivered = inject_to_pane(&panes, &tid, &msg);
+    let delivered = inject_to_pane(&panes, &tid, &msg, &app.state::<PaneEmus>());
     let receipt = match delivered {
-        Ok(_) => await_render(&cap, before, &receipt_needle(text), &receipt_needle_tail(text)),
+        Ok(submit) => delivery_receipt(await_render(&cap, before, &receipt_needle(text), &receipt_needle_tail(text)), submit),
         Err(_) => Receipt::NotAttempted,
     };
     chair_audit(
@@ -11671,6 +12879,7 @@ fn chair_inject_exec(app: &AppHandle, target: &str, text: &str) -> String {
             // The caller is the chair's own loop, and it acts on this string. It must learn the
             // difference here rather than discovering it later in its own audit trail.
             Receipt::Received => format!("delivered to {} (rendered in pane — not proof it was read)", short_id(&tid)),
+            Receipt::NotSubmitted => not_submitted_line(short_id(&tid)),
             _ => unconfirmed_delivery_line(short_id(&tid)),
         },
         Err(e) => format!("delivery failed: {e}"),
@@ -11728,6 +12937,7 @@ fn librarian_call_exec(app: &AppHandle, text: &str) -> String {
         return out;
     }
     let msg = format!("[librarian:LIB] {text}");
+    let msg = with_send_stamp(&msg, chrono::Utc::now());
     // Receipt taken BEFORE the write, so only bytes arriving after it can count as this
     // write's render — the same discipline as chair_inject_exec, and for the same reason:
     // inject_to_pane returning Ok means the bytes left our pipe and nothing more.
@@ -11741,9 +12951,9 @@ fn librarian_call_exec(app: &AppHandle, text: &str) -> String {
         return queued;
     }
     let before = fs::metadata(&cap).map(|m| m.len()).unwrap_or(0);
-    let delivered = inject_to_pane(&panes, MAIN_SID, &msg);
+    let delivered = inject_to_pane(&panes, MAIN_SID, &msg, &app.state::<PaneEmus>());
     let receipt = match delivered {
-        Ok(_) => await_render(&cap, before, &receipt_needle(text), &receipt_needle_tail(text)),
+        Ok(submit) => delivery_receipt(await_render(&cap, before, &receipt_needle(text), &receipt_needle_tail(text)), submit),
         Err(_) => Receipt::NotAttempted,
     };
     match delivered {
@@ -11762,10 +12972,16 @@ fn librarian_call_exec(app: &AppHandle, text: &str) -> String {
 /// `Receipt::Received` and nothing else — the text was found rendered in the receiver's capture after the write — so a
 /// write that merely succeeded can never be reported to the sender as a delivery. One function so the rule is pinned
 /// once (`ring_reply_tests`); the words are unchanged from the two inline copies it replaced.
+///
+/// D415: three words. "delivered … and submitted" only when the composer was seen to empty (`delivery_receipt`);
+/// NOT SUBMITTED when our text is still in the receiver's input box; UNCONFIRMED otherwise.
 fn ring_reply(dest: &str, receipt: Receipt) -> String {
     match receipt {
-        Receipt::Received => format!("delivered to {dest} (rendered in its pane — not proof it was read)"),
-        _ => format!("written to {dest} — UNCONFIRMED (no render yet; verify before treating as delivered)"),
+        Receipt::Received => format!("delivered to {dest} and submitted (rendered in its pane — not proof it was read)"),
+        Receipt::NotSubmitted => not_submitted_line(dest),
+        _ => format!(
+            "written to {dest} — UNCONFIRMED (no render yet, or its input box could not be read; verify before treating as delivered)"
+        ),
     }
 }
 
@@ -11803,6 +13019,7 @@ fn pane_call_librarian_exec(app: &AppHandle, from: Option<&str>, text: &str) -> 
         return out;
     }
     let msg = format!("[pane:{letter}] {text}");
+    let msg = with_send_stamp(&msg, chrono::Utc::now());
     // Receipt taken BEFORE the write, so only bytes arriving after it can count as this write's
     // render — same discipline as chair_inject_exec and librarian_call_exec.
     let cap = capture_path(dest);
@@ -11815,9 +13032,9 @@ fn pane_call_librarian_exec(app: &AppHandle, from: Option<&str>, text: &str) -> 
         return queued;
     }
     let before = fs::metadata(&cap).map(|m| m.len()).unwrap_or(0);
-    let delivered = inject_to_pane(&panes, dest, &msg);
+    let delivered = inject_to_pane(&panes, dest, &msg, &app.state::<PaneEmus>());
     let receipt = match delivered {
-        Ok(_) => await_render(&cap, before, &receipt_needle(text), &receipt_needle_tail(text)),
+        Ok(submit) => delivery_receipt(await_render(&cap, before, &receipt_needle(text), &receipt_needle_tail(text)), submit),
         Err(_) => Receipt::NotAttempted,
     };
     match delivered {
@@ -13183,6 +14400,121 @@ fn leave_close_requested(app: &AppHandle) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------
+// D317 (pane B; plan `exo_memory/loop/plan_close_confirm_2026-10-13.md`): THE WINDOW'S X ASKS BEFORE IT ENDS WORKING SEATS. The
+// keeper, 14:08: "if any seat or shell is working, and X is pressed, ask again yes or no you know before close". Before, the X
+// went straight into `leave_close_requested`, which ends every seat.
+
+/// The seats whose gate is not Ready, in the order given, or None when the X may close as today (every seat Ready, or no seats).
+/// Unknown counts as working (fail-safe): Stale, Unstamped and Contradicted ask exactly as Working does.
+fn close_needs_confirm(seats: &[(String, PaneGate)]) -> Option<Vec<(String, PaneGate)>> {
+    let working: Vec<(String, PaneGate)> = seats.iter().filter(|(_, g)| *g != PaneGate::Ready).cloned().collect();
+    if working.is_empty() { None } else { Some(working) }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum CloseRoute {
+    /// A Leave is under way: today's path, which answers "busy" (or "use-button" once the Leave screen is up).
+    Leave,
+    /// A check is in flight, or the question went out under CLOSE_ASK_HOLD ago: this X adds nothing.
+    Swallow,
+    /// Read the seats' gates and either ask or close.
+    Check,
+}
+
+/// How long after the question goes out a further X is swallowed. The contract (`close-confirm`, `leave_confirmed`) has no
+/// signal for [Keep working], which "does nothing at all", so the app cannot know the question was dismissed: a guard that held
+/// until an answer would swallow every X after a [Keep working] for good. So the guard stops STACKING (a double click, a held
+/// key) and a later X asks again; the modal treats a repeat `close-confirm` as a refresh. A judgement, not a measurement.
+const CLOSE_ASK_HOLD: Duration = Duration::from_secs(2);
+
+/// What an X on the main window does, from the Leave's phase, whether a check is in flight, and how long ago the question went out.
+fn close_route(leave_idle: bool, checking: bool, since_asked: Option<Duration>) -> CloseRoute {
+    if !leave_idle {
+        return CloseRoute::Leave;
+    }
+    if checking || since_asked.is_some_and(|d| d < CLOSE_ASK_HOLD) {
+        return CloseRoute::Swallow;
+    }
+    CloseRoute::Check
+}
+
+/// A check is in flight: set by the X that starts it, cleared when it has asked or handed over to the Leave.
+static CLOSE_CHECKING: AtomicBool = AtomicBool::new(false);
+/// When the question last went out (CLOSE_ASK_HOLD).
+static CLOSE_ASKED_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Every seat's gate, the way the inbox and keep-warm read it (`pane_state`), labelled by the seat's name when it has one
+/// (PaneNames), else its short id. Sorted, so the question lists the seats in a stable order.
+fn close_seat_gates(app: &AppHandle) -> Vec<(String, PaneGate)> {
+    let mut ids: Vec<String> = app.state::<Panes>().0.lock().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    ids.sort();
+    ids.into_iter()
+        .map(|pane| {
+            let mut names: Vec<String> = app.state::<PaneNames>().0.lock()
+                .map(|m| m.iter().filter(|(_, id)| **id == pane).map(|(n, _)| n.clone()).collect())
+                .unwrap_or_default();
+            names.sort();
+            let label = names.into_iter().next().unwrap_or_else(|| short_id(&pane).to_string());
+            (label, pane_state(&app.state::<PaneEmus>(), &pane).0)
+        })
+        .collect()
+}
+
+/// THE MAIN WINDOW'S X (D317), already prevented by the caller. During a Leave: today's path ("busy"). Otherwise read every
+/// seat's gate OFF the event loop (the emulators' locks are the PTY readers' too) and either ask with `close-confirm` or, when
+/// nothing is working, run today's Leave. A second X while the check runs, or just after the question, adds nothing.
+fn close_on_x(app: &AppHandle) {
+    let since = CLOSE_ASKED_AT.lock().ok().and_then(|g| g.map(|t| t.elapsed()));
+    match close_route(LEAVE_PHASE.load(Ordering::SeqCst) == LEAVE_IDLE, CLOSE_CHECKING.load(Ordering::SeqCst), since) {
+        CloseRoute::Leave => leave_close_requested(app),
+        CloseRoute::Swallow => plog("CLOSE X — swallowed: the question is being asked or was just asked"),
+        CloseRoute::Check => {
+            if CLOSE_CHECKING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                return;
+            }
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let seats = close_seat_gates(&app);
+                match close_needs_confirm(&seats) {
+                    None => {
+                        plog(&format!("CLOSE X — {} seat(s), none working: the Leave runs as before", seats.len()));
+                        CLOSE_CHECKING.store(false, Ordering::SeqCst);
+                        leave_close_requested(&app);
+                    }
+                    Some(working) => {
+                        if let Ok(mut g) = CLOSE_ASKED_AT.lock() {
+                            *g = Some(Instant::now());
+                        }
+                        let rows: Vec<serde_json::Value> = working.iter().map(|(l, g)| serde_json::json!({ "label": l, "gate": gate_word(*g) })).collect();
+                        plog(&format!("CLOSE X — asked: {} working ({})", working.len(), working.iter().map(|(l, g)| format!("{l}={}", gate_word(*g))).collect::<Vec<_>>().join(", ")));
+                        let _ = app.emit("close-confirm", serde_json::json!({ "working": rows }));
+                        CLOSE_CHECKING.store(false, Ordering::SeqCst);
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// [Close] in the question (D317): today's Leave path, unchanged. A second call meets the Leave already running ("busy").
+#[tauri::command]
+fn leave_confirmed(app: AppHandle) {
+    plog("CLOSE CONFIRMED — the keeper chose [Close] with seats working");
+    leave_close_requested(&app);
+}
+
+/// The `gate` word in `close-confirm`'s `working` rows.
+fn gate_word(g: PaneGate) -> &'static str {
+    match g {
+        PaneGate::Ready => "ready",
+        PaneGate::Working => "working",
+        PaneGate::Stale => "stale",
+        PaneGate::Unstamped => "unstamped",
+        PaneGate::Contradicted => "contradicted",
+    }
+}
+
 /// §2.2, in order: end every seat and wait (1), find the stick (2), save (3–4), write the result (5), show it (6).
 fn leave_run(app: &AppHandle, b: LeaveBounds) {
     // 0 · §2.9 B2-1: THE PHASE IS ALREADY SET (leave_close_requested), so no new spawn can pass the funnel. Wait for the
@@ -13619,6 +14951,93 @@ fn leave_cleanup_at_launch() {
 }
 
 #[cfg(test)]
+mod close_confirm_tests {
+    use super::*;
+
+    fn seats(gs: &[(&str, PaneGate)]) -> Vec<(String, PaneGate)> { gs.iter().map(|(l, g)| (l.to_string(), *g)).collect() }
+
+    #[test]
+    fn every_seat_ready_closes_as_today() {
+        assert_eq!(close_needs_confirm(&seats(&[("A", PaneGate::Ready), ("librarian", PaneGate::Ready)])), None);
+    }
+
+    #[test]
+    fn no_seats_closes_as_today() {
+        assert_eq!(close_needs_confirm(&[]), None);
+    }
+
+    #[test]
+    fn each_gate_that_is_not_ready_asks_and_names_the_seat() {
+        for g in [PaneGate::Working, PaneGate::Stale, PaneGate::Unstamped, PaneGate::Contradicted] {
+            assert_eq!(close_needs_confirm(&seats(&[("A", PaneGate::Ready), ("C", g)])), Some(seats(&[("C", g)])), "{g:?} must ask");
+        }
+    }
+
+    #[test]
+    fn the_question_names_every_working_seat_in_order_and_no_ready_one() {
+        let s = seats(&[("A", PaneGate::Working), ("B", PaneGate::Ready), ("librarian", PaneGate::Unstamped), ("E", PaneGate::Ready)]);
+        assert_eq!(close_needs_confirm(&s), Some(seats(&[("A", PaneGate::Working), ("librarian", PaneGate::Unstamped)])));
+    }
+
+    #[test]
+    fn an_x_during_the_leave_keeps_todays_busy() {
+        assert_eq!(close_route(false, false, None), CloseRoute::Leave);
+        assert_eq!(close_route(false, true, Some(Duration::from_millis(100))), CloseRoute::Leave);
+    }
+
+    #[test]
+    fn a_second_x_while_the_check_runs_or_just_after_the_question_does_not_stack() {
+        assert_eq!(close_route(true, true, None), CloseRoute::Swallow);
+        assert_eq!(close_route(true, false, Some(CLOSE_ASK_HOLD - Duration::from_millis(1))), CloseRoute::Swallow);
+    }
+
+    #[test]
+    fn an_x_with_nothing_pending_checks_and_a_later_x_after_keep_working_asks_again() {
+        assert_eq!(close_route(true, false, None), CloseRoute::Check);
+        assert_eq!(close_route(true, false, Some(CLOSE_ASK_HOLD)), CloseRoute::Check);
+    }
+
+    #[test]
+    fn the_gate_words_are_the_contracts() {
+        let w: Vec<_> = [PaneGate::Ready, PaneGate::Working, PaneGate::Stale, PaneGate::Unstamped, PaneGate::Contradicted].into_iter().map(gate_word).collect();
+        assert_eq!(w, ["ready", "working", "stale", "unstamped", "contradicted"]);
+    }
+
+    // THE WIRING, read at the one place it can be: the window event, the handler list and the two new functions.
+    fn src() -> String { std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap() }
+    fn body_of(src: &str, sig: &str) -> String {
+        let after = src.split(sig).nth(1).unwrap_or_else(|| panic!("no {sig} — re-point this test"));
+        after[..after.find("\n}\n").expect("no end of function")].to_string()
+    }
+
+    #[test]
+    fn the_main_windows_x_goes_to_the_question_not_straight_to_the_leave() {
+        let s = src();
+        let ev = &s[s.rfind(".on_window_event(").expect("on_window_event")..];   // rfind: this test's own text comes first
+        let ev = &ev[..ev.find("\n        })").expect("end of on_window_event")];
+        assert!(ev.contains("close_on_x(window.app_handle())"), "the X must go through close_on_x:\n{ev}");
+        assert!(!ev.contains("leave_close_requested("), "the X must not reach the Leave without the question:\n{ev}");
+    }
+
+    #[test]
+    fn leave_confirmed_is_a_command_and_runs_todays_leave() {
+        let s = src();
+        let list = &s[s.rfind("tauri::generate_handler![").expect("handler list")..];   // rfind: this test's own text comes first
+        let list = &list[..list.find("])").expect("end of handler list")];
+        assert!(list.contains("leave_confirmed"), "leave_confirmed is not in the handler list");
+        let b = body_of(&s, "fn leave_confirmed(app: AppHandle)");
+        assert!(b.contains("leave_close_requested(&app)"), "leave_confirmed must run today's Leave path:\n{b}");
+    }
+
+    #[test]
+    fn the_check_asks_with_close_confirm_or_runs_the_leave() {
+        let b = body_of(&src(), "fn close_on_x(app: &AppHandle)");
+        assert!(b.contains("close_needs_confirm(") && b.contains("\"close-confirm\"") && b.contains("leave_close_requested("), "close_on_x:\n{b}");
+        assert!(b.contains("CloseRoute::Swallow"), "close_on_x must honour the guard:\n{b}");
+    }
+}
+
+#[cfg(test)]
 mod stick_wiring_tests {
     use super::*;
 
@@ -13700,6 +15119,8 @@ fn main() {
         warn_second_instance();
         return;
     }
+    // D338: Consonance keeps its own priority (High) and opts out of EcoQoS, and so do its WebView2 children; a failure is logged and never stops the start.
+    priority::start();
     // P-LEAVE-2 (a): the session's start time, recorded here and nowhere later — see APP_STARTED_AT.
     let _ = app_started_at();
     // Stage 7a/7b: the pull queue. pull_tx → the MCP control plane (bodies' raise_pull);
@@ -14166,16 +15587,16 @@ fn main() {
             pane_scrollback,
             audio_sources, audio_start, audio_stop, audio_status, audio_snapshot,
             stick_state, stick_rehearse, stick_start_applier, stick_release, stick_ack_result, stick_close_app,
-            leave_exit
+            leave_exit, leave_confirmed
         ])
-        // P-LEAVE §2.2: the main window's close is PREVENTED and becomes the Leave. `app.exit` (the applier's confirm,
+        // P-LEAVE §2.2: the main window's close is PREVENTED and becomes the Leave (D317: after the question, when a seat is working). `app.exit` (the applier's confirm,
         // the Leave's own button) raises ExitRequested, not CloseRequested, so it does not come back through here —
         // which is §2.4's first guard: the applier never runs a Leave.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
-                    leave_close_requested(window.app_handle());
+                    close_on_x(window.app_handle());   // D317: it asks first when a seat is working
                 }
             }
         })
@@ -15292,8 +16713,8 @@ mod committee_brief_tests {
     fn the_committee_brief_resolves() {
         let b = room_brief("COMMITTEE.md")
             .expect("COMMITTEE.md must resolve; if this fails the intake skips it in SILENCE");
-        assert!(b.contains("Route the OBJECT"), "the brief lost its briefing practice");
-        assert!(b.contains("No seat scores its own work"), "the brief lost the scoring rule");
+        assert!(b.contains("Route the object, not a description of it"), "the brief lost its briefing practice (reworded by D277 B's rule draft (1cff0c86..fe232323); the rule is kept)");
+        assert!(b.contains("Have a seat with no stake score your work"), "the brief lost the scoring rule (reworded by D277 B's rule draft (1cff0c86..fe232323); the rule is kept)");
     }
 
     /// The wiring, not the unit. A pane is briefed by assemble_intake(); a document that resolves
@@ -15304,8 +16725,8 @@ mod committee_brief_tests {
         let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let intake = assemble_intake();
         assert!(
-            intake.contains("Route the OBJECT"),
-            "the committee practice never reached the pane intake"
+            intake.contains("Route the object, not a description of it"),
+            "the committee practice never reached the pane intake (reworded by D277 B's rule draft (1cff0c86..fe232323); the rule is kept)"
         );
         assert!(
             intake.contains("A chord needs two notes"),
@@ -15340,9 +16761,11 @@ mod committee_brief_tests {
             "the brief still carries the retired board route"
         );
         let intake = assemble_intake();
+        // the route is ONE sentence: ring the librarian with call_librarian, carrying the pointer. Both on the same line, so the pin goes red if the
+        // sentence is deleted even while "call_librarian" survives elsewhere in the brief (4 occurrences) and "the pointer" in another rule
         assert!(
-            intake.contains("carrying the POINTER to that file"),
-            "the hand-back route never reached the pane intake"
+            intake.lines().any(|l| l.contains("carrying the pointer") && l.contains("call_librarian")),
+            "the hand-back route never reached the pane intake (reworded by D277 B's rule draft (1cff0c86..fe232323); the rule is kept)"
         );
     }
 
@@ -15576,8 +16999,8 @@ mod librarian_tests {
     #[test]
     fn the_intake_carries_the_citation_rule() {
         let i = librarian_intake().expect("LIBRARIAN.md must resolve or the seat must refuse to wake");
-        assert!(i.contains("cite, do not recollect"), "the intake lost its central rule");
-        assert!(i.contains("Saying nothing is a valid turn"), "the intake lost the quiet rule");
+        assert!(i.contains("Cite, do not recollect"), "the intake lost its central rule (reworded by D277 B's rule draft (1cff0c86..fe232323); the rule is kept)");
+        assert!(i.contains("Silence is a valid turn"), "the intake lost the quiet rule (reworded by D277 B's rule draft (1cff0c86..fe232323); the rule is kept)");
     }
 
     /// The brief comes BEFORE the room in the intake. A seat that reads the corpus before it reads
@@ -15585,7 +17008,7 @@ mod librarian_tests {
     #[test]
     fn the_brief_precedes_the_room() {
         let i = librarian_intake().expect("intake must resolve");
-        let brief = i.find("cite, do not recollect").expect("brief missing");
+        let brief = i.find("Cite, do not recollect").expect("brief missing (reworded by D277 B's rule draft (1cff0c86..fe232323); the rule is kept)");
         let room = i.find("# THE ROOM you are holding").expect("room header missing");
         assert!(brief < room, "the brief must be read before the corpus it holds");
     }
@@ -15604,7 +17027,424 @@ mod librarian_tests {
     fn the_intake_states_what_the_seat_must_not_do() {
         let i = librarian_intake().expect("intake must resolve");
         assert!(i.contains("does not directly build"), "the intake must carry the corrected frame: the seat works, it does not directly build (keeper, ccd74fd)");
-        assert!(i.contains("write it down in the turn it forms"), "the intake lost the compaction rule");
+        // one sentence carries the rule (write it down in the turn it forms, as append-only entries): both on the same line, so neither phrase alone passes
+        assert!(
+            i.lines().any(|l| l.contains("in the turn it forms") && l.contains("append-only")),
+            "the intake lost the compaction rule (reworded by D277 B's rule draft (1cff0c86..fe232323); the rule is kept)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shelf_handback_tests {
+    // ---- D296: the unmapped hand-backs and the shorter entry, on the STRICT walk ---------------
+    // Every row builds its own room under the OS temp dir and points DIRS at it, so the walk reads
+    // a fixture and never the live corpus. Each was run red on 9041faf9 before the change; the
+    // hand-back (`handback/p-shelfbudget-C_2026-10-11.md`) says, per row, whether it was red for
+    // its own property or only because hand-backs were not indexed at all, and which mutant pins it.
+    use super::*;
+
+    struct Room { root: PathBuf, _g: DirsGuard<'static> }
+    impl Drop for Room {
+        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.root); }
+    }
+
+    fn room(tag: &str) -> Room {
+        let g = DirsGuard::take();
+        let root = std::env::temp_dir().join(format!("consonance_d296_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("fixture room");
+        fs::write(root.join("BOOT.md"), "# boot\n").unwrap();
+        *DIRS.lock().unwrap() = Some(Dirs {
+            room: root.join("BOOT.md").display().to_string(),
+            instances: root.join("instances").display().to_string(),
+            data: root.join("data").display().to_string(),
+        });
+        Room { root, _g: g }
+    }
+
+    fn put(root: &Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, body).unwrap();
+    }
+
+    fn tier(shelf: &str) -> Vec<&str> {
+        shelf.lines().filter(|l| {
+            l.starts_with("- map/") || l.starts_with("- journal/") || l.starts_with("- loop/") || l.starts_with("- handback/")
+        }).collect()
+    }
+
+    const LONG: &str = "Twelve laps of a record that the index used to drop because every title ran to a hundred and fifty characters of seat machine and clock";
+
+    #[test]
+    fn a_long_titled_entry_the_window_used_to_drop_is_listed() {
+        let r = room("drop");
+        for i in 0..12 {
+            put(&r.root, &format!("loop/plan_x{i:02}_2026-09-{:02}.md", 10 + i), &format!("# {LONG}\n\nbody\n"));
+        }
+        // 12 entries at <= 110 B each: room for all of them once the title is cut, and for about
+        // six at the uncut ~190 B.
+        let shelf = corpus_shelf_at_with_index(0, 12 * 110);
+        let listed = tier(&shelf);
+        assert_eq!(listed.len(), 12, "a dropped entry is still dropped: {listed:#?}");
+        assert!(!shelf.contains("dropped by the index window"), "the window still dropped something");
+        for l in &listed {
+            assert!(l.starts_with("- loop/plan_x") && l.contains("_2026-09-") && l.contains(".md  ("),
+                "the path was not kept whole: {l}");
+            assert!(l.ends_with(" ..."), "a cut title carries no visible mark: {l}");
+        }
+    }
+
+    #[test]
+    fn a_mapped_hand_back_is_not_listed_and_an_unmapped_one_is() {
+        let r = room("mapped");
+        put(&r.root, "map/C.md", "- a finding: `handback/p-bypath_2026-10-01.md`\n- another, by stem: p-bystem_2026-10-03\n");
+        put(&r.root, "handback/p-bypath_2026-10-01.md", "# named by path\n");
+        put(&r.root, "handback/p-bystem_2026-10-03.md", "# named by stem\n");
+        put(&r.root, "handback/p-free_2026-10-02.md", "# named by no map\n");
+        let shelf = corpus_shelf_at_with_index(0, 100_000);
+        assert!(shelf.contains("- handback/p-free_2026-10-02.md  ("), "the unmapped hand-back is not listed");
+        assert!(!shelf.contains("p-bypath_2026-10-01"), "a hand-back a map names by path is listed: a second route");
+        assert!(!shelf.contains("p-bystem_2026-10-03"), "a hand-back a map names by stem is listed: a second route");
+    }
+
+    #[test]
+    fn the_index_budget_is_never_exceeded_with_hand_backs_in_the_tier() {
+        let r = room("budget");
+        for i in 0..6 {
+            put(&r.root, &format!("handback/p-h{i}_2026-10-0{}.md", i + 1), &format!("# {LONG}\n"));
+        }
+        for i in 0..20 {
+            put(&r.root, &format!("loop/note_{i:02}_2026-09-{:02}.md", 1 + i), &format!("# {LONG}\n"));
+        }
+        put(&r.root, "map/C.md", "nothing named here\n");
+        for budget in [0usize, 1, 60, 61, 200, 777, 1_500, 2_222, 5_000, 100_000] {
+            let shelf = corpus_shelf_at_with_index(0, budget);
+            let spent: usize = tier(&shelf).iter().map(|l| l.len() + 1).sum();
+            assert!(spent <= budget, "the index tier spent {spent} B against a budget of {budget}");
+        }
+        let all = corpus_shelf_at_with_index(0, 100_000);
+        assert_eq!(all.lines().filter(|l| l.starts_with("- handback/")).count(), 6,
+            "at a budget that fits everything, the six hand-backs must all be in the tier being measured");
+    }
+
+    #[test]
+    fn an_empty_handback_dir_lists_none_and_says_zero() {
+        let r = room("empty");
+        put(&r.root, "map/C.md", "x\n");
+        put(&r.root, "loop/a_2026-09-01.md", "# a\n");
+        fs::create_dir_all(r.root.join("handback")).unwrap();
+        let shelf = corpus_shelf_at_with_index(0, 100_000);
+        assert!(shelf.contains("0 hand-back(s) that no map/*.md line names"), "the zero is not reported");
+        assert!(!shelf.contains("- handback/"), "an empty handback/ produced an entry");
+        assert!(shelf.contains("- loop/a_2026-09-01.md  ("), "the rest of the tier went missing");
+        // and with no handback/ at all
+        fs::remove_dir_all(r.root.join("handback")).unwrap();
+        let shelf = corpus_shelf_at_with_index(0, 100_000);
+        assert!(shelf.contains("0 hand-back(s) that no map/*.md line names"), "a missing handback/ is not reported as zero");
+    }
+
+    #[test]
+    fn a_missing_map_dir_leaves_every_top_level_hand_back_unmapped() {
+        let r = room("nomap");
+        put(&r.root, "handback/p-one_2026-10-01.md", "# one\n");
+        put(&r.root, "handback/p-two_2026-10-02.md", "no heading here\n");
+        let shelf = corpus_shelf_at_with_index(0, 100_000);
+        assert!(shelf.contains("2 hand-back(s) that no map/*.md line names"), "with no map/ nothing is named, so both are unmapped");
+        assert!(shelf.contains("- handback/p-one_2026-10-01.md  (1 lines)  one"));
+        assert!(shelf.contains("- handback/p-two_2026-10-02.md  (1 lines)  (no title)"), "an untitled entry must say so");
+        let one = shelf.find("p-one_2026-10-01").unwrap();
+        let two = shelf.find("p-two_2026-10-02").unwrap();
+        assert!(two < one, "hand-backs are listed newest first");
+    }
+
+    #[test]
+    fn an_evidence_folder_md_is_never_listed() {
+        let r = room("evidence");
+        put(&r.root, "map/C.md", "x\n");
+        put(&r.root, "handback/p-a_2026-10-05.md", "# the hand-back\n");
+        put(&r.root, "handback/p-a_2026-10-05_evidence/notes.md", "# notes\n");
+        put(&r.root, "handback/p-a_2026-10-05_evidence/out/report.md", "# report\n");
+        let shelf = corpus_shelf_at_with_index(0, 100_000);
+        assert!(shelf.contains("- handback/p-a_2026-10-05.md  ("), "the top-level hand-back is not listed");
+        assert!(!shelf.contains("_evidence/"), "an evidence-folder .md is listed");
+        // by count too: a walk that recursed and labelled by file name alone would print
+        // `handback/notes.md` and never show the folder
+        assert_eq!(shelf.lines().filter(|l| l.starts_with("- handback/")).count(), 1, "an evidence-folder .md is listed");
+    }
+
+    // ---- D301 part 3: the hand-back index switch (`handback_index`), on both shelves ---------------
+    // Off by default; the byte-identity of both shelves with it off is shown on the real room by the intake dump, base tree
+    // against this one (`handback/p-handbackindex-E_2026-10-11.md`). These rows pin what the switch does on a fixture.
+
+    /// Turns the switch on for this thread and puts it back OFF on drop, even when an assertion fails.
+    struct Switch;
+    impl Switch {
+        fn on() -> Self {
+            TEST_HANDBACK_INDEX.with(|m| m.set(true));
+            Switch
+        }
+    }
+    impl Drop for Switch {
+        fn drop(&mut self) { TEST_HANDBACK_INDEX.with(|m| m.set(false)); }
+    }
+
+    /// Two mapped hand-backs (one named by path, one by stem), one unmapped, an evidence folder under a mapped one, and a dated
+    /// loop/ note whose date falls between the two mapped ones.
+    fn handback_room(tag: &str) -> Room {
+        let r = room(tag);
+        put(&r.root, "map/C.md", "- a finding: `handback/p-mapped-a_2026-10-03.md`\n- another, by stem: p-mapped-b_2026-10-01\n");
+        put(&r.root, "handback/p-mapped-a_2026-10-03.md", "# mapped by path\n");
+        put(&r.root, "handback/p-mapped-b_2026-10-01.md", "# mapped by stem\n");
+        put(&r.root, "handback/p-free_2026-10-02.md", "# named by no map\n");
+        put(&r.root, "handback/p-mapped-a_2026-10-03_evidence/notes.md", "# evidence notes\n");
+        put(&r.root, "handback/p-mapped-a_2026-10-03_evidence/out/report.md", "# evidence report\n");
+        put(&r.root, "loop/plan_2026-10-02.md", "# a plan\n");
+        put(&r.root, "handback/p-notes_2026-10-04.txt", "not a hand-back: not .md\n");
+        r
+    }
+
+    fn lines_for(shelf: &str, name: &str) -> usize {
+        shelf.lines().filter(|l| l.starts_with(&format!("- handback/{name}.md  ("))).count()
+    }
+
+    #[test]
+    fn the_handback_index_switch_reads_on_only_for_json_true() {
+        for raw in ["", "{ not json", "{}", r#"{"handback_index":false}"#, r#"{"handback_index":"true"}"#, r#"{"handback_index":1}"#,
+            r#"{"handback_index":"on"}"#, r#"{"handback_index":null}"#, r#"{"gates_mode":"light"}"#] {
+            assert!(!handback_index_from(raw), "read ON from {raw:?}");
+        }
+        for raw in [r#"{"handback_index":true}"#, "\u{feff}{\"handback_index\":true}", r#"{"gates_mode":"light","handback_index":true}"#] {
+            assert!(handback_index_from(raw), "read OFF from {raw:?}");
+        }
+        assert!(!handback_index(), "the switch is not off by default under test");
+    }
+
+    #[test]
+    fn with_the_switch_off_the_strict_shelf_lists_only_the_unmapped_hand_back() {
+        let r = handback_room("hbi_off");
+        let shelf = corpus_shelf_at_with_index(0, 100_000);
+        assert_eq!(lines_for(&shelf, "p-free_2026-10-02"), 1, "D296's unmapped hand-back, which is not behind the switch, is gone");
+        // by line, not by substring: map/C.md's own index title can quote a hand-back's name
+        assert_eq!(lines_for(&shelf, "p-mapped-a_2026-10-03") + lines_for(&shelf, "p-mapped-b_2026-10-01"), 0,
+            "a mapped hand-back is listed with the switch off");
+        assert_eq!(shelf.lines().filter(|l| l.starts_with("- handback/")).count(), 1, "a second hand-back line with the switch off");
+        assert!(!shelf.contains("handback_index"), "the switch's header line is printed with the switch off");
+        drop(r);
+    }
+
+    #[test]
+    fn with_the_switch_on_every_hand_back_is_listed_once_by_path_and_no_evidence_md() {
+        let r = handback_room("hbi_on");
+        let _s = Switch::on();
+        let shelf = corpus_shelf_at_with_index(0, 100_000);
+        for name in ["p-free_2026-10-02", "p-mapped-a_2026-10-03", "p-mapped-b_2026-10-01"] {
+            assert_eq!(lines_for(&shelf, name), 1, "{name} is not listed exactly once:\n{shelf}");
+        }
+        assert_eq!(shelf.lines().filter(|l| l.starts_with("- handback/")).count(), 3, "a fourth hand-back line: an evidence .md?");
+        assert!(!shelf.contains("_evidence"), "an evidence-folder .md is listed");
+        assert!(shelf.contains("1 hand-back(s) that no map/*.md line names are indexed with the record (1 listed).\n"),
+            "D296's line no longer counts the unmapped ones alone");
+        assert!(shelf.contains("handback_index is on: 2 hand-back(s) a map/*.md line names are indexed with the dated record \
+            (2 listed, 0 dropped by the index window).\n"), "the switch's line is wrong or missing:\n{shelf}");
+        // The unmapped one rides first (group 1); the mapped ones go in with the dated loop/ record, newest first.
+        let at = |n: &str| shelf.find(n).unwrap_or_else(|| panic!("{n} missing"));
+        let (free, a, plan, b) = (at("- handback/p-free_"), at("- handback/p-mapped-a_"), at("- loop/plan_2026-10-02"), at("- handback/p-mapped-b_"));
+        assert!(free < a && a < plan && plan < b, "order is not unmapped, then dated newest first: {free} {a} {plan} {b}");
+        drop(r);
+    }
+
+    #[test]
+    fn with_the_switch_on_the_index_budget_holds_and_its_drops_are_counted() {
+        let r = handback_room("hbi_budget");
+        let _s = Switch::on();
+        let full = corpus_shelf_at_with_index(0, 100_000);
+        let cost = |p: &str| full.lines().find(|l| l.starts_with(p)).map(|l| l.len() + 1).unwrap_or_else(|| panic!("{p} missing"));
+        // Room for map/C.md (group 0), the unmapped hand-back and the newest mapped one only: the loop/ note and the older
+        // mapped one drop.
+        let budget = cost("- map/C.md") + cost("- handback/p-free_") + cost("- handback/p-mapped-a_");
+        let shelf = corpus_shelf_at_with_index(0, budget);
+        assert!(shelf.contains("(1 listed, 1 dropped by the index window).\n"), "the mapped drop is not counted:\n{shelf}");
+        assert!(shelf.contains("2 index-tier entries ("), "the window's own total does not count both drops:\n{shelf}");
+        for budget in [0usize, 1, 40, budget - 1, budget, budget + 1, 5_000, 100_000] {
+            let shelf = corpus_shelf_at_with_index(0, budget);
+            let spent: usize = tier(&shelf).iter().map(|l| l.len() + 1).sum();
+            assert!(spent <= budget, "the index tier spent {spent} B against a budget of {budget}");
+        }
+        drop(r);
+    }
+
+    #[test]
+    fn the_light_shelf_gains_one_top_level_handback_line_with_the_switch_on_and_nothing_else() {
+        let root = std::env::temp_dir().join(format!("consonance_d301_light_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        put(&root, "cards/a.md", "CARD-A body");
+        put(&root, "loop/plan_2026-10-02.md", "# a plan\n");
+        put(&root, "handback/p-x_2026-10-01.md", "# x\n");
+        put(&root, "handback/p-y_2026-10-02.md", "# y\n");
+        put(&root, "handback/p-y_2026-10-02_evidence/z.md", "# written last, so the newest if it were counted\n");
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 11).unwrap();
+        let off = librarian_shelf_light_at(&root, today);
+        let on = { let _s = Switch::on(); librarian_shelf_light_at(&root, today) };
+        let _ = fs::remove_dir_all(&root);
+        assert!(!off.contains("handback"), "the light shelf names handback/ with the switch off");
+        let lines: Vec<&str> = on.lines().filter(|l| l.contains("handback")).collect();
+        assert_eq!(lines.len(), 1, "not one handback/ line: {lines:#?}");
+        assert!(lines[0].contains(" -- 2 .md file(s) at the top level"), "the evidence .md is counted: {}", lines[0]);
+        assert!(!lines[0].contains("_evidence"), "an evidence .md is named as the newest: {}", lines[0]);
+        assert_eq!(on.replacen(&format!("{}\n", lines[0]), "", 1), off, "the switch changed more than the one line");
+    }
+
+    /// MEASUREMENT, not a gate: the librarian intake in both modes WITH THE SWITCH ON, to $INTAKE_DUMP_DIR, on this tree's room.
+    /// With it off, `intake_light_tests::dump_intakes_for_measure` is the dump to compare byte for byte with the base tree's.
+    #[test]
+    #[ignore]
+    fn dump_intakes_with_the_handback_index_on() {
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let out = PathBuf::from(std::env::var("INTAKE_DUMP_DIR").expect("INTAKE_DUMP_DIR"));
+        fs::create_dir_all(&out).unwrap();
+        let _s = Switch::on();
+        for light in [false, true] {
+            TEST_INTAKE_LIGHT.with(|m| m.set(light));
+            let i = librarian_intake();
+            TEST_INTAKE_LIGHT.with(|m| m.set(false));
+            let tag = if light { "light" } else { "strict" };
+            fs::write(out.join(format!("librarian.{tag}.handback-on.md")), i.expect("intake")).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod index_title_tests {
+    use super::*;
+
+    #[test]
+    fn a_short_title_is_kept_whole_and_a_missing_one_says_so() {
+        assert_eq!(index_title("The bar, sealed"), "The bar, sealed");
+        assert_eq!(index_title(""), "(no title)");
+        let exact: String = "x".repeat(INDEX_TITLE_CHARS);
+        assert_eq!(index_title(&exact), exact, "a title at the cap is not cut");
+    }
+
+    #[test]
+    fn a_long_title_is_cut_at_a_word_boundary_with_a_visible_mark() {
+        let t = index_title("The shelf-budget bar, sealed before any code. Pane B, machine D, 2026-10-11");
+        assert_eq!(t, "The shelf-budget bar, sealed before any ...");
+        // no trailing punctuation before the mark
+        let t = index_title("Two old holes, closed: heavy-run's two surviving mutants, and more");
+        assert!(t.ends_with(" ...") && !t.trim_end_matches(" ...").ends_with(','), "{t}");
+        // multi-byte text is cut on chars, never inside one
+        let t = index_title(&"é ".repeat(60));
+        assert!(t.ends_with(" ...") && t.chars().count() <= INDEX_TITLE_CHARS + 4);
+    }
+
+    #[test]
+    fn a_single_word_longer_than_the_cap_is_cut_and_still_marked() {
+        let w = "a".repeat(INDEX_TITLE_CHARS + 10);
+        let t = index_title(&w);
+        assert_eq!(t, format!("{} ...", "a".repeat(INDEX_TITLE_CHARS)));
+    }
+
+    // ---- D297: a leading lap/ledger label is stripped before the cut ---------------------------
+    // Through `index_entry_line`, which the strict walk calls, so each row was runnable on 5d5740b4.
+    // Titles are verbatim headings from the D296 snapshot unless marked made-up. The hand-back
+    // (`handback/p-labelstrip-C_2026-10-11.md`) says which rows were red there and which pin the
+    // rule's narrowness (green on both sides by design, held by a mutant instead).
+
+    /// The title an index line shows for a file at `label` whose heading is `head`.
+    fn shown(label: &str, head: &str) -> String {
+        let line = index_entry_line(label, &format!("# {head}\n"));
+        line.split_once("lines)  ").expect("an index line").1.to_string()
+    }
+
+    #[test]
+    fn a_ledger_label_the_path_carries_is_stripped_before_the_cut() {
+        // B's D296 #8: "Q3" is a ledger id, "read" is in the path.
+        assert_eq!(shown("loop/q3_read_Jev_2026-09-27.md",
+            "Q3 read: Jev (typesafe/jev-1.13-20260917, through OpenRouter) — D162 resumed, pane E, 2026-10-01"),
+            "Jev (typesafe/jev-1.13-20260917 ...");
+        // ended by a standalone dash rather than a colon
+        assert_eq!(shown("loop/q3_units_2026-09-27.md",
+            "Q3 units — 40 pairs for the two-reader agreement test (D161, built by pane E on D, 2026-09-27)"),
+            "40 pairs for the two-reader agreement ...");
+        // a qualifier and its short argument ride with the id
+        assert_eq!(shown("loop/design_speed_measure_2026-10-06.md",
+            "D256 item 2: what \"always max speed\" would change, measured · pane E, on D, 2026-10-06 ~13:3x"),
+            "what \"always max speed\" would change ...");
+        // an id in parentheses inside the label; the rest then fits and is shown whole
+        assert_eq!(shown("handback/p-indicator-loop-chain-ui_2026-09-01.md",
+            "P-INDICATOR (L025) — the loop indicator in the UI"),
+            "the loop indicator in the UI");
+        // subject words the path already shows go with the id (B's loss rule allows it)
+        assert_eq!(shown("loop/rule_census_score_2026-10-02.md",
+            "D210 rule census: SCORE. Where MD rules work, and where they fail. Librarian, on D, 2026-10-02 13:2x."),
+            "SCORE. Where MD rules work, and where ...");
+    }
+
+    #[test]
+    fn a_path_token_of_four_or_more_chars_shows_a_word_it_begins() {
+        // made-up heading on a real path: `PREREG` shows "PRE-REGISTRATION" (B's §3 rule)
+        assert_eq!(shown("loop/compaction_corrections_2026-10-05/PREREG.md",
+            "D245 PRE-REGISTRATION: do the seat's own CORRECTION-ADJACENT sentences survive compaction?"),
+            "do the seat's own CORRECTION-ADJACENT ...");
+    }
+
+    #[test]
+    fn a_word_the_path_does_not_show_stops_the_label_and_nothing_is_stripped() {
+        // B's D296 #27: "(reordered first)" is two words no path token shows
+        assert_eq!(shown("handback/p-d177-rigid-C_2026-09-27.md",
+            "D177, packet C (reordered first): rigid downstream edits and one shared path"),
+            "D177, packet C (reordered first): rigid ...");
+        // made-up: "Consonance" is not in the path, so the id before it cannot take it along
+        assert_eq!(shown("loop/plan_consumer_refresh_2026-10-08.md",
+            "D273 Consonance consumer: bring it up to date with dev, ready for a new user."),
+            "D273 Consonance consumer: bring it up ...");
+    }
+
+    #[test]
+    fn a_label_must_end_at_a_separator() {
+        // B's D296 #12: the id is followed by the claim in parentheses, with no separator between
+        assert_eq!(shown("loop/qs2s_units_v2_2026-10-03.md",
+            "QS2S units v2, D217 (is seat Y correcting seat X?) — re-drawn for the readers' overlap and frozen by pane E, 2026-10-03"),
+            "QS2S units v2, D217 (is seat Y ...");
+    }
+
+    #[test]
+    fn a_leading_phrase_with_no_ledger_id_is_not_a_label() {
+        // B's D296 #2, #18, #20, verbatim: a document kind, a subject, a subject
+        assert_eq!(shown("loop/compaction_corrections_2026-10-05/PREREG.md",
+            "PRE-REGISTRATION — do the seat's own CORRECTION-ADJACENT sentences survive compaction? (D245 item 1, pane C)"),
+            "PRE-REGISTRATION — do the seat's own ...");
+        assert_eq!(shown("loop/battery_run2_sealed_rows_2026-09-25.md",
+            "Battery run 2 — the sealed rows, prepared by B (D136). **NOT FOR LANDING as they stand: no kind has a fieldable pair.**"),
+            "Battery run 2 — the sealed rows ...");
+        assert_eq!(shown("loop/plan_consumer_refresh_2026-10-08.md",
+            "Consonance consumer: bring it up to date with dev, ready for a new user. Librarian, on D, 2026-10-08 12:3x. Lap D273 (first of 2–4)."),
+            "Consonance consumer: bring it up to ...");
+        // a project name with digits is not a ledger id, even when the path shows it
+        assert_eq!(shown("loop/plan_t180_sharp_turns_2026-10-09.md",
+            "T-180: a 90° turn does not come out straight, and the turns cannot be as sharp as Thunderhead's."),
+            "T-180: a 90° turn does not come out ...");
+        // a lone capital is a seat's name, not an id, even when the path shows it (B's D296 #5)
+        assert_eq!(shown("map/M-2026-08-24.md", "M — the librarian, its own words, 2026-08-24"),
+            "M — the librarian, its own words ...");
+        // made-up: a packet code is capitals and digits; a lowercase run after `P-` is a word
+        assert_eq!(shown("loop/p_value_note_2026-10-01.md", "P-value: what a threshold of 0.05 does and does not tell a reader"),
+            "P-value: what a threshold of 0.05 does ...");
+    }
+
+    #[test]
+    fn a_title_within_the_cap_keeps_its_label() {
+        assert_eq!(shown("loop/sharp_turn_registration_2026-10-09.md", "D282: the Sharp turn bar, sealed"),
+            "D282: the Sharp turn bar, sealed");
+    }
+
+    #[test]
+    fn a_title_that_is_all_label_is_cut_as_before_and_never_says_no_title() {
+        // made-up: nothing would remain after the label, so the whole heading is cut as before
+        assert_eq!(shown("loop/d296_d297_d298.md", "D296 part 2, D297 part 3, D298 part 4, D299:"),
+            "D296 part 2, D297 part 3, D298 part 4 ...");
     }
 }
 
@@ -15658,6 +17498,9 @@ mod shelf_tests {
     #[test]
     #[ignore = "WORKSHOP-BOUND: the shelf is built from the room record"]
     fn the_index_window_is_newest_first_by_date_not_by_path() {
+        // D277 repair: this reads the room through the process-global DIRS, which 31 DirsGuard tests repoint at scratch rooms while
+        // holding DIRS_SERIAL; unlocked, a parallel run can read a scratch corpus (red for the chair on land-d277, green alone)
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let shelf = corpus_shelf_at(0);
         let newest = newest_dated_index_label().expect("the corpus must hold a dated loop/ file");
         assert!(
@@ -15678,6 +17521,9 @@ mod shelf_tests {
     /// printed a window that had not happened, and looked like the case was handled.
     #[test]
     fn the_header_counts_the_index_window_drop_from_what_was_delivered() {
+        // D277 repair: this reads the room through the process-global DIRS, which 31 DirsGuard tests repoint at scratch rooms while
+        // holding DIRS_SERIAL; unlocked, a parallel run can read a scratch corpus (red for the chair on land-d277, green alone)
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         // A budget of zero for the index means EVERY index-tier line is dropped, and the header
         // must say so with the real number rather than with the rule's intent.
         let shelf = corpus_shelf_at_with_index(0, 0);
@@ -15710,7 +17556,8 @@ mod shelf_tests {
     fn index_lines_of(shelf: &str) -> Vec<String> {
         shelf
             .lines()
-            .filter(|l| l.starts_with("- map/") || l.starts_with("- journal/") || l.starts_with("- loop/"))
+            // D296: the index tier now holds the unmapped hand-backs too (rule change, not a weaker check).
+            .filter(|l| l.starts_with("- map/") || l.starts_with("- journal/") || l.starts_with("- loop/") || l.starts_with("- handback/"))
             .map(|l| l.to_string())
             .collect()
     }
@@ -15728,6 +17575,9 @@ mod shelf_tests {
     #[test]
     #[ignore = "WORKSHOP-BOUND: the shelf is built from the room record"]
     fn the_index_window_is_a_prefix_so_its_date_range_is_not_a_lie() {
+        // D277 repair: this reads the room through the process-global DIRS, which 31 DirsGuard tests repoint at scratch rooms while
+        // holding DIRS_SERIAL; unlocked, a parallel run can read a scratch corpus (red for the chair on land-d277, green alone)
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let full = index_lines_of(&corpus_shelf_at_with_index(0, usize::MAX));
         assert!(full.len() > 10, "the corpus must have an index tier to window");
         let mut cum = 0usize;
@@ -15767,6 +17617,9 @@ mod shelf_tests {
     #[test]
     #[ignore = "WORKSHOP-BOUND: needs dated and undated loop files of this room"]
     fn undated_loop_entries_are_spent_last_and_never_outrank_a_dated_one() {
+        // D277 repair: this reads the room through the process-global DIRS, which 31 DirsGuard tests repoint at scratch rooms while
+        // holding DIRS_SERIAL; unlocked, a parallel run can read a scratch corpus (red for the chair on land-d277, green alone)
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let split = |s: &str| -> (usize, usize, usize) {
             let (mut dated, mut undated, mut standing) = (0, 0, 0);
             for l in index_lines_of(s).iter().filter(|l| l.starts_with("- loop/")) {
@@ -15797,6 +17650,9 @@ mod shelf_tests {
     #[test]
     #[ignore = "WORKSHOP-BOUND: needs loop/PROTOCOL.md of this room"]
     fn undated_all_caps_names_at_the_top_of_loop_are_protected_by_rule_not_by_list() {
+        // D277 repair: this reads the room through the process-global DIRS, which 31 DirsGuard tests repoint at scratch rooms while
+        // holding DIRS_SERIAL; unlocked, a parallel run can read a scratch corpus (red for the chair on land-d277, green alone)
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         assert!(loop_standing_instrument("loop/PROTOCOL.md"));
         assert!(loop_standing_instrument("loop/ESCALATIONS.md"));
         assert!(!loop_standing_instrument("loop/branch_layer.md"), "lower-case is a working document");
@@ -15831,6 +17687,9 @@ mod shelf_tests {
     #[test]
     #[ignore = "WORKSHOP-BOUND: needs the map entries of this room"]
     fn the_window_never_drops_map_or_journal_which_are_out_of_scope() {
+        // D277 repair: this reads the room through the process-global DIRS, which 31 DirsGuard tests repoint at scratch rooms while
+        // holding DIRS_SERIAL; unlocked, a parallel run can read a scratch corpus (red for the chair on land-d277, green alone)
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let windowed = corpus_shelf_at_with_index(0, 20_000);
         let full = corpus_shelf_at_with_index(0, usize::MAX);
         for pfx in ["- map/", "- journal/"] {
@@ -15845,6 +17704,9 @@ mod shelf_tests {
     /// with room for everything the collapsed line must not appear.
     #[test]
     fn a_generous_index_budget_drops_nothing_and_says_nothing() {
+        // D277 repair: this reads the room through the process-global DIRS, which 31 DirsGuard tests repoint at scratch rooms while
+        // holding DIRS_SERIAL; unlocked, a parallel run can read a scratch corpus (red for the chair on land-d277, green alone)
+        let _g = DIRS_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let shelf = corpus_shelf_at_with_index(0, 10_000_000);
         assert!(!shelf.contains("dropped by the index window"),
             "the window reported a drop it did not make");
@@ -19025,6 +20887,60 @@ mod composer_tristate_tests {
         assert_eq!(i.depth("p"), 0, "reported and gone");
     }
 
+    /// D424 ITEM 2, THE 22:37 CASE, through the inbox in the drain's own order (exit gate, refusals, then the take): O's
+    /// child exited with code 3 at about 22:24 and nothing reopened it; the chair's GO had been queued behind a ready
+    /// stamp from O's last Stop and a composer nobody could read. At the bound it was FORCED and read DELIVERED. It must
+    /// be refused, by name, and nothing must be left for the take to deliver.
+    #[test]
+    fn the_2237_case_a_queued_go_and_an_exited_pid_never_read_delivered() {
+        let t0 = Instant::now();
+        let i = Inbox::new();
+        i.push("c88002b1", "[chair:MAIN] D421c landing GO".into(), "D421c landing GO".into(), t0);
+        let o = pane_exit::PaneExit { pid: Some(31337), code: Some(3), at_ms: 1 };
+        let exits = HashMap::from([("c88002b1".to_string(), o)]);
+        let later = t0 + Duration::from_millis(MAX_HOLD_MS + 1);
+        let exit = pane_exit::exit_gate(&exits, &HashSet::new(), "c88002b1", Some(31337));
+        let refused = i.take_refused("c88002b1", exit, later);
+        let delivered = i.take_ready_read("c88002b1", PaneGate::Ready, false, false, later, true);
+        assert!(delivered.is_none(), "the GO was taken for delivery into an exited child: {:?}", delivered.map(|d| (d.1, d.2)));
+        assert_eq!(refused.len(), 1, "the GO was not refused");
+        assert_eq!((refused[0].1.as_str(), refused[0].0.starts_with("[chair:MAIN] ")), ("D421c landing GO", true));
+        assert_eq!(i.depth("c88002b1"), 0, "a refused message is still queued");
+    }
+
+    /// The refusal takes only that pane's messages, every one of them, in order, and an open pane's queue is untouched.
+    #[test]
+    fn a_refusal_takes_every_message_for_that_pane_and_none_for_another() {
+        let t0 = Instant::now();
+        let i = Inbox::new();
+        let o = pane_exit::PaneExit { pid: Some(7), code: Some(3), at_ms: 1 };
+        i.push("p", "one".into(), "a".into(), t0);
+        i.push("p", "two".into(), "b".into(), t0);
+        i.push("q", "other".into(), "c".into(), t0);
+        assert!(i.take_refused("p", pane_exit::ExitGate::Open, t0).is_empty(), "an open pane's queue was refused");
+        assert!(i.take_refused("p", pane_exit::ExitGate::AwaitReopen, t0).is_empty(), "a reopen in flight refused the queue");
+        let r = i.take_refused("p", pane_exit::ExitGate::Refuse(o), t0);
+        assert_eq!(r.iter().map(|x| x.1.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!((i.depth("p"), i.depth("q")), (0, 1));
+    }
+
+    /// D424 ITEM 2, AFTER THE REOPEN: a message held across the reopen waits for the NEW child. Queued long enough ago to
+    /// be past the bound, it is not forced into the reopened claude while that one is still starting up (no stamp of its
+    /// own, a screen still drawing); it goes when the new child's screen reads ready.
+    #[test]
+    fn a_message_held_across_the_reopen_waits_for_the_new_child() {
+        let t0 = Instant::now();
+        let i = Inbox::new();
+        i.push("p", "m".into(), "the GO".into(), t0);
+        let reopened = t0 + Duration::from_millis(MAX_HOLD_MS + 60_000);
+        i.restart_wait("p", reopened);
+        let starting = reopened + Duration::from_millis(1_000);
+        assert!(i.take_ready_read("p", PaneGate::Unstamped, false, false, starting, true).is_none(),
+            "the held message was forced into the reopened child before it was ready");
+        let (_, _, why, _) = i.take_ready_read("p", PaneGate::Unstamped, true, true, starting, true).expect("the new child is ready");
+        assert_eq!(why, None, "a ready new child should take it unforced");
+    }
+
     /// THE FALSIFIER, AND IT OUTRANKS THE FIX. This is the queue every dispatch uses. If anything
     /// added this lap can drop a message that was never withdrawn, the change is wrong.
     #[test]
@@ -20858,13 +22774,27 @@ mod ring_reply_tests {
         after[..after.find("\n}\n").expect("no end of function")].to_string()
     }
 
+    /// AMENDED D415 (pane C), because the rule changed: `Received` now means rendered AND submitted (`delivery_receipt`),
+    /// and the plan's step 6 has the reply say so. The words senders already read stay at the front, unchanged.
     #[test]
     fn a_rendered_ring_says_delivered_in_the_words_senders_already_read() {
-        assert_eq!(ring_reply("Main", Receipt::Received), "delivered to Main (rendered in its pane — not proof it was read)");
+        assert_eq!(ring_reply("Main", Receipt::Received), "delivered to Main and submitted (rendered in its pane — not proof it was read)");
         assert_eq!(
             ring_reply("the librarian", Receipt::Received),
-            "delivered to the librarian (rendered in its pane — not proof it was read)"
+            "delivered to the librarian and submitted (rendered in its pane — not proof it was read)"
         );
+    }
+
+    /// D415: our text still in the receiver's input box says so, loudly, says where it is, and never says delivered.
+    #[test]
+    fn a_ring_left_in_the_input_box_says_not_submitted_and_where_it_is() {
+        for dest in ["Main", "the librarian"] {
+            let s = ring_reply(dest, Receipt::NotSubmitted);
+            assert!(s.starts_with("NOT SUBMITTED"), "{s}");
+            assert!(s.contains(&format!("{dest}'s input box")), "{s}");
+            assert!(s.contains("do NOT re-send"), "a re-send appends: {s}");
+            assert!(!s.contains("delivered to"), "{s}");
+        }
     }
 
     #[test]
@@ -20898,6 +22828,212 @@ mod ring_reply_tests {
     }
 }
 
+/// D415 (pane C) — a delivered message must SUBMIT, or say plainly that it did not. The decision is pure and the
+/// writer is faked, so nothing here needs a PTY: `deliver` is run over a byte sink and a scripted list of screens.
+#[cfg(test)]
+mod submit_check_tests {
+    use super::*;
+
+    const RULE: &str = "────────────────────────────────────────";
+    const MSG: &str = "[pane:C] D415 hand-back: exo_memory/handback/p-d415-submit-C_2026-10-19.md\nNEXT: librarian checks it";
+
+    /// A screen with a composer: scrollback, the rule, the composer rows, the rule, a status row. `typed` is the
+    /// same grid unless `dim` blanks the composer's text the way `typed_only` blanks a grey suggestion.
+    fn screen(composer: &[&str], dim: bool) -> (Vec<String>, Vec<String>) {
+        let mut rendered: Vec<String> = vec!["● an earlier reply".into(), String::new(), RULE.into()];
+        rendered.extend(composer.iter().map(|s| s.to_string()));
+        rendered.push(RULE.into());
+        rendered.push("  ? for shortcuts".into());
+        let mut typed = rendered.clone();
+        if dim {
+            let i = composer_row(&rendered).expect("premise: the composer is found");
+            typed[i] = "\u{276f} ".to_string();
+        }
+        (rendered, typed)
+    }
+    fn empty() -> (Vec<String>, Vec<String>) {
+        screen(&["\u{276f} "], false)
+    }
+    /// Our message, shown inline and wrapped the way the composer wraps a paste.
+    fn ours() -> (Vec<String>, Vec<String>) {
+        screen(&["\u{276f} [pane:C] D415 hand-back: exo_memory/handback/p-d415-sub", "  mit-C_2026-10-19.md", "  NEXT: librarian checks it"], false)
+    }
+    fn keepers() -> (Vec<String>, Vec<String>) {
+        screen(&["\u{276f} sup brah"], false)
+    }
+
+    /// Runs `deliver` over a recording writer and a scripted screen per reading (None = no screen).
+    fn run(text: &str, screens: Vec<Option<(Vec<String>, Vec<String>)>>) -> (Result<Submit, String>, Vec<u8>, Vec<Duration>, usize) {
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut slept: Vec<Duration> = Vec::new();
+        let mut script = screens.into_iter();
+        let mut reads = 0usize;
+        let out = deliver(
+            &mut |f| f(&mut bytes),
+            &mut || {
+                reads += 1;
+                script.next().unwrap_or(None)
+            },
+            &mut |d| slept.push(d),
+            text,
+        );
+        (out, bytes, slept, reads)
+    }
+
+    fn pastes(b: &[u8]) -> usize {
+        b.windows(6).filter(|w| *w == b"\x1b[200~").count()
+    }
+    /// The bytes after the one paste: only lone Enters may follow it.
+    fn after_paste(b: &[u8]) -> Vec<u8> {
+        let end = b.windows(6).position(|w| w == b"\x1b[201~").expect("premise: a paste was written") + 6;
+        b[end..].to_vec()
+    }
+    fn assert_only_enters(b: &[u8], n: usize) {
+        assert_eq!(pastes(b), 1, "exactly one paste, never a second (a paste APPENDS)");
+        let tail = after_paste(b);
+        assert_eq!(tail, vec![b'\r'; n], "after the paste: {n} lone Enter(s) and nothing else — no backspace, ctrl-u or escape");
+    }
+
+    #[test]
+    fn our_text_gone_after_the_first_enter_is_submitted_with_no_retry() {
+        let (out, bytes, _, _) = run(MSG, vec![Some(empty())]);
+        assert_eq!(out, Ok(Submit::Submitted { retries: 0 }));
+        assert_only_enters(&bytes, 1);
+    }
+
+    #[test]
+    fn our_text_stuck_after_the_enter_and_gone_after_one_retry_is_submitted_after_one_retry() {
+        let (out, bytes, _, _) = run(MSG, vec![Some(ours()), Some(empty())]);
+        assert_eq!(out, Ok(Submit::Submitted { retries: 1 }));
+        assert_only_enters(&bytes, 2);
+    }
+
+    #[test]
+    fn our_text_there_through_every_retry_is_not_submitted_and_nothing_is_pasted_or_cleared() {
+        let (out, bytes, _, reads) = run(MSG, vec![Some(ours()); 10]);
+        let retries = (SUBMIT_CHECK_GAPS_MS.len() - 1) as u32;
+        assert_eq!(out, Ok(Submit::NotSubmitted { retries }));
+        assert_only_enters(&bytes, 1 + retries as usize);
+        assert_eq!(reads, SUBMIT_CHECK_GAPS_MS.len(), "bounded: one reading per gap, then it stops");
+    }
+
+    #[test]
+    fn a_collapsed_paste_of_ours_is_ours_and_gets_the_enter_again() {
+        let n = MSG.matches('\n').count();
+        let stuck = screen(&[&format!("\u{276f} [Pasted text #88 +{n} lines]")], false);
+        assert!(ours_in_box(&stuck.0, MSG), "the placeholder with our newline count is ours");
+        let (out, bytes, _, _) = run(MSG, vec![Some(stuck), Some(empty())]);
+        assert_eq!(out, Ok(Submit::Submitted { retries: 1 }));
+        assert_only_enters(&bytes, 2);
+    }
+
+    #[test]
+    fn a_collapsed_paste_with_another_line_count_is_not_ours() {
+        let n = MSG.matches('\n').count();
+        let other = screen(&[&format!("\u{276f} [Pasted text #3 +{} lines]", n + 7)], false);
+        assert!(!ours_in_box(&other.0, MSG));
+        let (out, bytes, _, _) = run(MSG, vec![Some(other)]);
+        assert_eq!(out, Ok(Submit::NotOurs));
+        assert_only_enters(&bytes, 1);
+    }
+
+    #[test]
+    fn the_keepers_text_in_the_composer_is_not_ours_and_no_enter_is_sent_on_it() {
+        let (out, bytes, _, reads) = run(MSG, vec![Some(keepers()); 10]);
+        assert_eq!(out, Ok(Submit::NotOurs));
+        assert_only_enters(&bytes, 1);
+        assert_eq!(reads, 1, "it stops at the first reading of text that is not ours");
+    }
+
+    #[test]
+    fn a_dim_suggestion_only_reads_as_empty_and_is_submitted() {
+        let dim = screen(&["\u{276f} Try \"how do I log an error?\""], true);
+        assert_eq!(composer_state(&dim.0, &dim.1), Composer::Empty, "premise: the colour rule blanks it");
+        let (out, bytes, _, _) = run(MSG, vec![Some(dim)]);
+        assert_eq!(out, Ok(Submit::Submitted { retries: 0 }));
+        assert_only_enters(&bytes, 1);
+    }
+
+    #[test]
+    fn an_unreadable_composer_is_unknown_never_submitted_and_gets_no_enter() {
+        let dialog: (Vec<String>, Vec<String>) = (vec!["\u{276f} No, exit".into()], vec!["\u{276f} No, exit".into()]);
+        let (out, bytes, _, reads) = run(MSG, vec![None, Some(dialog.clone()), Some(dialog), None]);
+        assert_eq!(out, Ok(Submit::Unknown));
+        assert_only_enters(&bytes, 1);
+        assert_eq!(reads, SUBMIT_CHECK_GAPS_MS.len());
+    }
+
+    #[test]
+    fn the_decision_table() {
+        let max = (SUBMIT_CHECK_GAPS_MS.len() - 1) as u32;
+        assert_eq!(submit_step(Composer::Empty, false, 0), SubmitStep::Submitted);
+        assert_eq!(submit_step(Composer::Empty, true, max), SubmitStep::Submitted);
+        assert_eq!(submit_step(Composer::HasText, true, 0), SubmitStep::RetryEnter);
+        assert_eq!(submit_step(Composer::HasText, true, max - 1), SubmitStep::RetryEnter);
+        assert_eq!(submit_step(Composer::HasText, true, max), SubmitStep::NotSubmitted);
+        assert_eq!(submit_step(Composer::HasText, false, 0), SubmitStep::NotOurs);
+        for u in [Unreadable::NoRow, Unreadable::GridMismatch, Unreadable::NoScreen] {
+            assert_eq!(submit_step(Composer::Unreadable(u), true, 0), SubmitStep::Unknown, "{u:?}");
+        }
+    }
+
+    /// The paste, its wait and the first Enter are as before this lap; the whole check adds at most the gaps.
+    #[test]
+    fn the_wait_is_bounded_by_the_submit_delay_plus_the_gaps() {
+        let (_, _, slept, _) = run(MSG, vec![Some(ours()); 10]);
+        let payload = format!("\x1b[200~{MSG}\x1b[201~");
+        assert_eq!(slept[0], Duration::from_millis(submit_delay_ms(payload.len())), "the first wait is the old one");
+        let gaps: Vec<u64> = slept[1..].iter().map(|d| d.as_millis() as u64).collect();
+        assert_eq!(gaps, SUBMIT_CHECK_GAPS_MS.to_vec());
+    }
+
+    #[test]
+    fn a_ring_is_received_only_when_rendered_and_submitted() {
+        let s = Submit::Submitted { retries: 0 };
+        let n = Submit::NotSubmitted { retries: 3 };
+        assert_eq!(delivery_receipt(Receipt::Received, s), Receipt::Received);
+        assert_eq!(delivery_receipt(Receipt::Received, n), Receipt::NotSubmitted, "rendered in the box is not submitted");
+        assert_eq!(delivery_receipt(Receipt::Unconfirmed, n), Receipt::NotSubmitted);
+        assert_eq!(delivery_receipt(Receipt::Received, Submit::Unknown), Receipt::Unconfirmed);
+        assert_eq!(delivery_receipt(Receipt::Received, Submit::NotOurs), Receipt::Unconfirmed);
+        assert_eq!(delivery_receipt(Receipt::Unconfirmed, s), Receipt::Unconfirmed, "an empty box with no render is not proof");
+        assert_eq!(delivery_receipt(Receipt::NotAttempted, s), Receipt::NotAttempted);
+    }
+
+    /// Every write into a pane is the one paste in `deliver`: no other bracketed paste and no edit key is written
+    /// anywhere outside the tests.
+    #[test]
+    fn the_source_writes_one_paste_and_no_clear_or_delete_key() {
+        let src = fs::read_to_string("src/main.rs").expect("read own source").replace("\r\n", "\n");
+        // The live code: every line outside a `#[cfg(test)] mod`, which ends at its column-0 `}` (the walk
+        // `every_write_into_a_pane_asks_the_inbox_first` uses, for the reason it gives).
+        let (mut live, mut in_test, mut pending, mut skipped) = (String::new(), false, false, 0);
+        for line in src.lines() {
+            if in_test {
+                in_test = !line.starts_with('}');
+                continue;
+            }
+            if line.starts_with("#[cfg(test)]") {
+                pending = true;
+                continue;
+            }
+            if pending && line.starts_with("mod ") {
+                (pending, in_test, skipped) = (false, true, skipped + 1);
+                continue;
+            }
+            pending = false;
+            live.push_str(line);
+            live.push('\n');
+        }
+        assert!(skipped >= 2, "premise: the test modules were recognised ({skipped})");
+        assert!(live.contains("fn deliver("), "premise: the live code holds the delivery");
+        assert_eq!(live.matches("\\x1b[200~").count(), 1, "one bracketed paste in the live code");
+        for key in ["b\"\\x7f\"", "b\"\\x08\"", "b\"\\x15\"", "b\"\\x1b\"", "b\"\\x03\""] {
+            assert!(!live.contains(key), "a pane write of {key} edits or interrupts the composer");
+        }
+    }
+}
+
 /// D143 (pane A) — a pane's claude process ending by itself. The decision is pane_exit.rs's, tested there; these pin
 /// the wiring it depends on and the keep-warm row built on D138's.
 #[cfg(test)]
@@ -20910,6 +23046,91 @@ mod pane_exit_wiring_tests {
     }
     fn src() -> String {
         fs::read_to_string("src/main.rs").expect("read own source").replace("\r\n", "\n")
+    }
+
+    fn kept(pane: &str, cwd: &str) -> KeptPane {
+        KeptPane { pane: pane.to_string(), cwd: cwd.to_string(), label: String::new() }
+    }
+
+    /// D424 ITEM 1: a committee pane resumes in the folder its kept record holds; a fixed seat in its own; a committee
+    /// pane with no record (or an empty folder) and every human pane are left to the ↻, whatever the record says.
+    #[test]
+    fn a_committee_pane_resumes_where_its_kept_record_says_and_a_human_pane_never() {
+        let rec = [kept("c88002b1-74d8", "C:/Consonance/instances/sibling-a"), kept("blank", "  "), kept("room", "C:/rooms/x")];
+        assert_eq!(reopen_seat(None, "committee", &rec, "c88002b1-74d8"), (pane_exit::Seat::Committee, Some("C:/Consonance/instances/sibling-a".to_string())));
+        assert_eq!(reopen_seat(None, "committee", &rec, "nobody"), (pane_exit::Seat::Human, None), "a committee pane with no record was reopened");
+        assert_eq!(reopen_seat(None, "committee", &rec, "blank"), (pane_exit::Seat::Human, None), "an empty folder was resumed in");
+        assert_eq!(reopen_seat(None, "human", &rec, "room"), (pane_exit::Seat::Human, None), "a human pane was reopened");
+        assert_eq!(reopen_seat(Some("C:/main".to_string()), "main", &[], MAIN_SID), (pane_exit::Seat::Fixed, Some("C:/main".to_string())));
+    }
+
+    /// D424 ITEM 2, WIRED: the door asks the exit gate before the delivery decision; the drain asks it before any reading,
+    /// refuses and tells the sender, and takes nothing for a pane that is not open; the stamp reader asks whether the
+    /// stamp is the dead child's.
+    #[test]
+    fn the_door_and_the_drain_ask_the_exit_gate_first() {
+        let s = src();
+        let door = body_of(&s, "fn gate_or_queue(");
+        let (g, d) = (door.find("exit_gate_for(app, pane_id)").expect("the door does not ask the exit gate"), door.find("drain_decision(").unwrap());
+        assert!(g < d, "the door decides delivery before it asks whether the child exited");
+        assert!(door[g..d].contains("pane_exit::refused_row(") && door[g..d].contains("return Some(row);"), "the door's refusal is not returned to the sender");
+        let drain = body_of(&s, "fn drain_inboxes(");
+        let at = |n: &str| drain.find(n).unwrap_or_else(|| panic!("drain_inboxes has no {n}"));
+        let (gate, refuse, tell, stop, read, take) = (at("exit_gate_for(app, &pane)"), at(".take_refused(&pane, exit,"), at("tell_refused_sender("), at("if exit != pane_exit::ExitGate::Open {\n            return;\n        }"), at("pane_state(&app.state::<PaneEmus>(), &pane)"), at(".take_ready_read("));
+        assert!(gate < refuse && refuse < tell && tell < stop && stop < read && read < take, "exit gate -> refusals -> told -> stop -> reading -> take is out of order");
+        assert!(body_of(&s, "fn read_stamp(").contains("gate_stamp(&raw, harvest_guard::recover(reopened_at().lock()).get(pane).copied())"), "the stamp reader does not ask about the reopen");
+    }
+
+    /// D424 ITEM 2, AFTER THE REOPEN, at the stamp: the dead child's last Stop stamp (O's, before the reopen) reads as no
+    /// stamp for the reopened child, so the screen gate decides; the new child's own stamp, written after, reads as itself;
+    /// a pane never reopened keeps its stamp.
+    #[test]
+    fn the_dead_childs_ready_stamp_is_not_the_reopened_childs() {
+        let reopen = iso_utc_ms("2026-10-21T04:25:00.000Z");
+        let old = r#"{"ready":true,"at":"2026-10-21T04:12:31.000Z","event":"stop"}"#;
+        let new = r#"{"ready":true,"at":"2026-10-21T04:26:10.000Z","event":"stop"}"#;
+        let timeless = r#"{"ready":true}"#;
+        assert_eq!(gate_stamp(old, reopen), Stamp::Absent, "the dead child's ready stamp let a message into the new one");
+        assert_eq!(gate_stamp(timeless, reopen), Stamp::Absent);
+        assert_eq!(gate_stamp(new, reopen), Stamp::Done, "the new child's own stamp was ignored");
+        assert_eq!(gate_stamp(old, None), Stamp::Done, "a pane never reopened lost its stamp");
+        assert_eq!(gate_stamp(r#"{"ready":false,"at":"2026-10-21T04:26:10.000Z"}"#, reopen), Stamp::Working);
+    }
+
+    /// D424 CUT, WIRED (P's items 1, 2 and 5): the sender is chosen by `refusal_recipient`, and a lettered one gets a NOT
+    /// TOLD row naming its letter, never a note; both new-session paths (the automatic reopen's Ok arm and the ↻) drop the
+    /// exit and record the reopen after the new session is in, and the ↻ restarts the held messages' wait before it.
+    #[test]
+    fn the_cut_tells_only_fixed_senders_and_both_new_sessions_clear_the_exit() {
+        let s = src();
+        let tell = body_of(&s, "fn tell_refused_sender(");
+        assert!(tell.contains("pane_exit::refusal_recipient(text)"), "the sender is not chosen by refusal_recipient");
+        let nt = tell.find("pane_exit::Recipient::NotTold(letter) =>").expect("no NotTold arm");
+        let arm = &tell[nt..tell.find("pane_exit::Recipient::Nobody => return,").expect("no Nobody arm")];
+        assert!(arm.contains("REFUSAL NOT TOLD -> pane:{letter}"), "the NOT TOLD row does not name the letter");
+        assert!(arm.trim_end().ends_with("return;\n        }"), "the NotTold arm goes on to route the note");
+        assert!(!tell.contains("sender_of("), "the old any-sender path is still there");
+        let reopen = body_of(&s, "fn pty_reopen(");
+        let at = |b: &str, n: &str| b.find(n).unwrap_or_else(|| panic!("no {n}"));
+        assert!(at(&reopen, "restart_wait(&pane, Instant::now())") < at(&reopen, "insert_pane(") && at(&reopen, "insert_pane(") < at(&reopen, "new_session_for(&pane)"),
+            "the ↻: restart the wait, insert, then clear the exit and record the reopen");
+        let exit = body_of(&s, "fn on_pane_exit(");
+        assert!(at(&exit, "insert_pane(&app.state::<Panes>(), pane.to_string(), session);") < at(&exit, "new_session_for(pane)"),
+            "the automatic reopen does not clear the exit after the new session is in");
+    }
+
+    /// D424 ITEM 1, WIRED: the reopen is marked under way BEFORE the exit is recorded (so the gate never refuses what
+    /// should wait), the held messages' wait restarts BEFORE the new pid lands, and the mark is cleared on both arms.
+    #[test]
+    fn the_reopen_is_marked_before_the_exit_and_cleared_after_the_new_pid() {
+        let body = body_of(&src(), "fn on_pane_exit(");
+        let at = |n: &str| body.find(n).unwrap_or_else(|| panic!("on_pane_exit has no {n}"));
+        assert!(body.contains("reopen_seat(fixed_seat_cwd(pane), &role, &read_kept(), pane)"), "a committee pane's folder is not looked up");
+        assert!(at("reopening().lock()).insert(pane.to_string())") < at("pane_exits().lock()).insert("), "the exit is recorded before the reopen is marked");
+        let (restart, insert) = (at("restart_wait(pane, Instant::now())"), at("insert_pane(&app.state::<Panes>(), pane.to_string(), session);"));
+        assert!(restart < insert, "the new pid lands before the held messages' wait restarts");
+        assert_eq!(body.matches("reopening().lock()).remove(pane)").count(), 2, "the reopen mark is not cleared on both arms");
+        assert!(at("reopened_at().lock()).insert(") < at("spawn_claude_pane("), "the reopen time is set after the new child could stamp");
     }
 
     /// The exited pane's row says EXITED even when its transcript ends on an open AskUserQuestion — a dead process is
@@ -21145,15 +23366,25 @@ mod config_merge_tests {
 }"#;
     const NOT_OWNED: [&str; 8] = ["base", "flags", "instances", "dream_model", "dream_times", "machine_tag", "state_dir", "zz_unknown"];
 
-    fn tmp(name: &str, text: Option<&str>) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("cfgmerge-{}-{}", std::process::id(), name));
+    fn tmp(name: &str, text: Option<&str>) -> crate::test_scratch::Scratch {
+        let d = crate::test_scratch::root().join(format!("cfgmerge-{}-{}", std::process::id(), name));
         let _ = fs::create_dir_all(&d);
         let p = d.join(".consonance.json");
         let _ = fs::remove_file(&p);
         if let Some(t) = text {
             fs::write(&p, t).unwrap();
         }
-        p
+        crate::test_scratch::Scratch::inside(d, p)   // D299: the folder went with the file; it used to stay behind
+    }
+    #[test]
+    fn the_cfgmerge_helper_leaves_no_folder_behind() {
+        let dir;
+        {
+            let p = tmp("leakcheck", Some("{}"));
+            dir = p.parent().unwrap().to_path_buf();
+            assert!(dir.exists(), "control: the folder exists while the test holds it");
+        }
+        assert!(!dir.exists(), "the helper's folder outlived the test");
     }
     fn read_obj(p: &Path) -> serde_json::Map<String, serde_json::Value> {
         match serde_json::from_str::<serde_json::Value>(&fs::read_to_string(p).unwrap()).unwrap() {
@@ -21242,5 +23473,87 @@ mod config_merge_tests {
         let mut owned = SETTINGS_KEYS.to_vec();
         owned.sort();
         assert_eq!(fields, owned);
+    }
+}
+
+// D309 (seat A): the send time on a ring. The label stays the first thing in the message, the time goes on a LAST line, and a held
+// delivery says both times. Pure functions, so the tests do not need a pane; the three delivery sites and the drain are pinned by
+// source shape, like their neighbours, because they take an AppHandle.
+#[cfg(test)]
+mod ring_stamp_tests {
+    use super::*;
+
+    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc)
+    }
+    const RING: &str = "[pane:B] D9 hand-back: exo_memory/handback/x.md\nNEXT: librarian collate when read";
+
+    #[test]
+    fn a_stamped_ring_keeps_its_text_as_a_prefix_and_ends_on_one_send_line() {
+        let s = with_send_stamp(RING, at("2026-10-12T07:25:51Z"));
+        assert!(s.starts_with(RING), "the label, the text and its NEXT line are untouched, so every head-anchored reader still sees them");
+        assert_eq!(s.lines().count(), RING.lines().count() + 1, "exactly one line is added");
+        let last = s.lines().last().unwrap();
+        assert!(last.starts_with("[sent 2026-10-12T07:25:51Z · ") && last.ends_with(" local]"), "{last}");
+    }
+
+    #[test]
+    fn the_stamp_is_never_a_leading_line_because_every_ring_reader_anchors_on_the_head() {
+        let s = with_send_stamp("[chair:MAIN] go", at("2026-10-12T07:25:51Z"));
+        assert!(s.starts_with("[chair:MAIN] go"));
+        assert!(!s.trim_start().starts_with("[sent"));
+    }
+
+    #[test]
+    fn a_held_delivery_says_both_times_and_how_long_it_waited() {
+        let sent = with_send_stamp(RING, at("2026-10-12T07:25:51Z"));
+        let held = with_delivery_stamp(&sent, at("2026-10-12T07:31:03Z"));
+        let last = held.lines().last().unwrap();
+        assert!(held.starts_with(RING));
+        assert!(last.contains("[sent 2026-10-12T07:25:51Z"), "{last}");
+        assert!(last.contains("HELD 312 s"), "{last}");
+        assert!(last.contains("delivered 2026-10-12T07:31:03Z"), "{last}");
+        assert_eq!(held.lines().count(), sent.lines().count(), "the line is rewritten, not added to");
+    }
+
+    #[test]
+    fn the_delivery_stamp_is_applied_once_and_only_to_a_message_that_carries_the_send_stamp() {
+        let sent = with_send_stamp(RING, at("2026-10-12T07:25:51Z"));
+        let once = with_delivery_stamp(&sent, at("2026-10-12T07:31:03Z"));
+        assert_eq!(with_delivery_stamp(&once, at("2026-10-12T09:00:00Z")), once, "a second pass must not rewrite it");
+        for plain in ["ok", RING, "x\n[sent not a time]", "x\n[sent 2026-10-12T07:25:51Z · fake", "x\n[sent 2026-10-12T07:25:51Z · fake]"] {
+            assert_eq!(with_delivery_stamp(plain, at("2026-10-12T07:31:03Z")), plain, "{plain:?}");
+        }
+    }
+
+    #[test]
+    fn a_clock_that_moved_back_reads_zero_seconds_not_a_negative_wait() {
+        let sent = with_send_stamp(RING, at("2026-10-12T07:25:51Z"));
+        assert!(with_delivery_stamp(&sent, at("2026-10-12T07:20:00Z")).lines().last().unwrap().contains("HELD 0 s"));
+    }
+
+    fn body_of(src: &'static str, name: &str) -> &'static str {
+        src.split(name).nth(1).and_then(|b| b.split("\nfn ").next()).unwrap_or_else(|| panic!("{name} exists"))
+    }
+
+    #[test]
+    fn the_three_ring_senders_stamp_the_message_after_writing_the_label_and_before_the_gate() {
+        let src = include_str!("main.rs");
+        for (func, label) in [("fn chair_inject_exec(", "format!(\"[chair:MAIN] {text}\")"), ("fn librarian_call_exec(", "format!(\"[librarian:LIB] {text}\")"), ("fn pane_call_librarian_exec(", "format!(\"[pane:{letter}] {text}\")")] {
+            let b = body_of(src, func);
+            let l = b.find(&format!("let msg = {label};")).unwrap_or_else(|| panic!("{func}: the label line is gone or changed (the mutation harness anchors on it)"));
+            let s = b.find("let msg = with_send_stamp(&msg, chrono::Utc::now());").unwrap_or_else(|| panic!("{func}: the send stamp is not applied"));
+            let g = b.find("gate_or_queue(").unwrap();
+            assert!(l < s && s < g, "{func}: label, then stamp, then the gate");
+        }
+    }
+
+    #[test]
+    fn the_drain_rewrites_the_stamp_to_say_delivered_just_before_it_writes() {
+        let src = include_str!("main.rs");
+        let b = body_of(src, "fn drain_inboxes(");
+        let w = b.find("with_delivery_stamp(&text, chrono::Utc::now())").expect("the drain stamps the delivery time");
+        let i = b.find("inject_to_pane(&app.state::<Panes>(), &pane, &text").expect("the drain writes");
+        assert!(w < i, "the held message is stamped BEFORE it is written");
     }
 }

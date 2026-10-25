@@ -102,10 +102,18 @@ const MUTANTS = [
   ['token: redaction applies to a one-character token (ordinary text is eaten)', HOOK, "token.length >= 4 ?", "token.length >= 1 ?"],
   ['token: the pointer line is not redacted', HOOK, "pointer: clip(scrub(R(first.trim())), 400)", "pointer: clip(scrub(first.trim()), 400)"],
   ['token: the unmatched items are not redacted', HOOK, "unmatched: d.unmatched.slice(0, 12).map((x) => clip(scrub(R(x)), 200))", "unmatched: d.unmatched.slice(0, 12).map((x) => clip(scrub(x), 200))"],
+  ['D418 warn: the warn row unmatched items are not scrubbed (a key shape)', HOOK, "unmatched: d.unmatched.slice(0, 12).map((w) => clip(scrub(R(w)), 200))", "unmatched: d.unmatched.slice(0, 12).map((w) => clip(R(w), 200))"],
+  ['D418 warn: light refuses again instead of warning', HOOK, "if (mode === 'light') { record(dir, { ...base, decision: 'warn',", "if (false) { record(dir, { ...base, decision: 'warn',"],
   ['token: the allowed items are not redacted', HOOK, "items: d.items.slice(0, 12).map((x) => clip(scrub(R(x)), 200))", "items: d.items.slice(0, 12).map((x) => clip(scrub(x), 200))"],
   ['token: the deny reason is not redacted', HOOK, "return emitDeny(R(d.reason));", "return emitDeny(d.reason);"],
   ['token: the token itself is written into the row', HOOK, "const base = { seat, tool, ringSha,", "const base = { token, seat, tool, ringSha,"],
   ['token: the target is not redacted', HOOK, "clip(scrub(R(String((payload.tool_input && payload.tool_input.target) || ''))), 20)", "clip(scrub(String((payload.tool_input && payload.tool_input.target) || '')), 20)"],
+  // ---- light mode (D277 part 2; D288 F1: the command rule matches a segment that opens something, never a command's text) ----
+  ['light D288: the command rule matches the raw command text again (an echo counts)', HOOK, "segs.some((s) => stripCd(s).includes(itemC))", "cmd.includes(itemC)"],
+  ['light D288: a comment segment counts', HOOK, "leadingWord(s) !== '#' && ", ""],
+  ['light D288: an echo, ls or stat segment counts', HOOK, "s && leadingWord(s) !== '#' && !NON_OPENING.has(leadingWord(s)))", "s)"],
+  ['light D288: the whole-chain match is gone (a cited command that ran no longer matches)', HOOK, "(cmdC === itemC || segs.some", "(segs.some"],
+  ['light D277: light is strict (lightMatch never consulted)', HOOK, "return strict || (mode === 'light' ? lightMatch(item, calls) : null);", "return strict;"],
   // ---- registration ----
   ['install: the gate no longer covers chair_inject', INSTALL, "|mcp__consonance__call_chair|mcp__consonance__chair_inject' }", "|mcp__consonance__call_chair' }"],
   ['install: the SECOND READER\'s matcher also gains chair_inject', INSTALL, "Rel = 'hooks\\second-reader.js';      Runner = 'node';\n     Matcher = 'mcp__consonance__call_librarian|mcp__consonance__call_chair' }", "Rel = 'hooks\\second-reader.js';      Runner = 'node';\n     Matcher = 'mcp__consonance__call_librarian|mcp__consonance__call_chair|mcp__consonance__chair_inject' }"],
@@ -113,9 +121,11 @@ const MUTANTS = [
 ];
 
 function tree() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sg-mut-'));
+  const dir = require('./scratch.js').mkdtemp('sg-mut-');
   fs.mkdirSync(path.join(dir, 'consonance', 'hooks'), { recursive: true });
   for (const f of [HOOK, SUITE, ...SIBLINGS]) fs.copyFileSync(path.join(HERE, f), path.join(dir, 'consonance', 'hooks', f));
+  // scratch.js: the suite makes its temp folders through it (D287 part 1); without it the control is red at load
+  fs.mkdirSync(path.join(dir, 'consonance', 'tools'), { recursive: true }); fs.copyFileSync(path.join(HERE, '..', 'tools', 'scratch.js'), path.join(dir, 'consonance', 'tools', 'scratch.js'));
   fs.mkdirSync(path.join(dir, 'dev', 'shell'), { recursive: true }); fs.copyFileSync(path.join(REPO, INSTALL), path.join(dir, INSTALL));
   fs.mkdirSync(path.dirname(path.join(dir, PLAN)), { recursive: true }); fs.copyFileSync(path.join(REPO, PLAN), path.join(dir, PLAN));
   return dir;

@@ -48,7 +48,7 @@ function test(name, fn) {
 }
 
 const REPO = path.resolve(__dirname, '..', '..');
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'installonly-'));
+const tmp = require('./scratch.js').mkdtemp('installonly-');
 let seq = 0;
 
 // A throwaway repo: only the two source directories the manifest draws from, plus the script.
@@ -622,6 +622,24 @@ test('D218: a fresh machine gets reply-slot.js and sources-gate.js in the SAME d
   assert.strictEqual((found['reply-slot.js'] || []).length, 1); assert.strictEqual((found['sources-gate.js'] || []).length, 1);
   assert.strictEqual(path.dirname(found['reply-slot.js'][0]), path.dirname(found['sources-gate.js'][0]), 'the two are not side by side');
   for (const n of ['reply-slot.js', 'sources-gate.js']) assert.strictEqual(fs.readFileSync(found[n][0], 'utf8'), fs.readFileSync(path.join(REPO, 'consonance', 'hooks', n), 'utf8'), n);
+});
+
+// D454 part 3 (pane E, P's cold read 1C.6 / 1B.3): hooks/README says which files are "not in the installer's list". That sentence named three
+// (and jev-flags) while install.ps1's $unmanaged had five rows, claim-check added since 0.1.1. The README now follows the list, and this row holds it there.
+test('D454: hooks/README names exactly the files of install.ps1 $unmanaged as not in the installer list, and says how many', () => {
+  const repo = path.resolve(__dirname, '..', '..');
+  const ps = fs.readFileSync(path.join(repo, 'dev', 'shell', 'install.ps1'), 'utf8');
+  const block = ps.slice(ps.indexOf('$unmanaged = @('), ps.indexOf('\n)', ps.indexOf('$unmanaged = @(')));
+  const listed = [...block.matchAll(/Src = '[^']*\\([^\\']+\.js)'/g)].map((m) => m[1]).sort();
+  assert.ok(listed.length >= 1, 'the $unmanaged list was read');
+  const readme = fs.readFileSync(path.join(repo, 'consonance', 'hooks', 'README.md'), 'utf8');
+  const at = readme.indexOf('As the script stands'), end = readme.indexOf('is a library', at);
+  assert.ok(at >= 0 && end > at, 'the sentence is in the README');
+  const sentence = readme.slice(at, end);
+  const named = [...new Set([...sentence.matchAll(/`([a-z0-9-]+\.js)`/g)].map((m) => m[1]))].filter((n) => n !== 'blind.js').sort();
+  assert.deepStrictEqual(named, listed, 'the README names the $unmanaged files, no more and no fewer');
+  const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+  assert.match(sentence, new RegExp('\\b' + words[listed.length] + '\\b'), 'and gives their number, ' + words[listed.length]);
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

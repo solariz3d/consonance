@@ -13,7 +13,7 @@ const { spawnSync } = require('child_process');
 const HOOK = path.join(__dirname, 'ask-ending.js');
 const G = require('./ask-ending.js');
 const FAKE = ['sk', 'or', 'v1', 'a1b2c3d4e5f6a7b8c9d0e1f2'].join('-');
-const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
+const tmp = (p) => require('../tools/scratch.js').mkdtemp(p);
 const user = (text) => ({ type: 'user', message: { role: 'user', content: text } });
 const assistant = (...blocks) => ({ type: 'assistant', message: { role: 'assistant', content: blocks } });
 const T = (text) => ({ type: 'text', text });
@@ -54,4 +54,16 @@ test('fails silent: a malformed payload, a missing transcript, no data dir: exit
   const missing = run([], { raw: JSON.stringify({ transcript_path: 'C:/no/such/file.jsonl' }) }); assert.equal(missing.code, 0); assert.equal(missing.out, '');
   const r = spawnSync(process.execPath, [HOOK], { input: '{}', encoding: 'utf8', env: { ...process.env, CONSONANCE_DATA: '', USERPROFILE: tmp('aeh-'), HOME: tmp('aeh-') } });
   assert.equal(r.status, 0); assert.equal(r.stdout, '');
+});
+
+// D454 part 3 (pane E): the data dir by the app's rule (main.rs data_dir: data_dir from ~/.consonance.json when set, else %USERPROFILE%\.consonance).
+// A new user who keeps the default Data folder saves data_dir "" and panes get no CONSONANCE_DATA, so this hook logged nothing at all.
+test('APP RULE (D454): with CONSONANCE_DATA unset and data_dir empty, an ending is logged under USERPROFILE/.consonance, and still never printed', () => {
+  const h = require('../tools/scratch.js').mkdtemp('app-rule-home-'), def = path.join(h, '.consonance'); fs.mkdirSync(def); fs.writeFileSync(path.join(h, '.consonance.json'), JSON.stringify({ data_dir: '' }));
+  const strangerEnv = (extra = {}) => { const e = { ...process.env, USERPROFILE: h, HOME: h, CONSONANCE_DREAM: '', ...extra }; delete e.CONSONANCE_DATA; return e; };
+  const tr = path.join(tmp('aet-'), 't.jsonl'); fs.writeFileSync(tr, [user('fix the bug'), assistant(T('Done.\n\nWant me to also update the README?'))].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const r = spawnSync(process.execPath, [HOOK], { input: JSON.stringify({ session_id: 's', transcript_path: tr, cwd: 'C:/x/myproject', hook_event_name: 'Stop', stop_hook_active: false }), encoding: 'utf8', env: strangerEnv() });
+  assert.equal(r.status, 0); assert.equal(r.stdout, '', 'shadow: nothing printed');
+  const lp = path.join(def, G.LEDGER), rows = fs.existsSync(lp) ? fs.readFileSync(lp, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+  assert.equal(rows.length, 1, 'one row under the default data dir'); assert.equal(rows[0].matched, true);
 });

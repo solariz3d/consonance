@@ -22,7 +22,7 @@ const WRITER = path.join(__dirname, 'lap-row.js');
 const NODE = process.execPath;
 
 function fixture(rows) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chain-'));
+  const dir = require('./scratch.js').mkdtemp('chain-');
   const ledger = path.join(dir, 'lap.jsonl');
   if (rows) fs.writeFileSync(ledger, rows.map(r => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n') + '\n');
   return { dir, ledger, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
@@ -43,7 +43,7 @@ const mod = () => { delete require.cache[require.resolve('./chain-status.js')]; 
 // D138: clause 6 reads seats' transcripts from ~/.claude/projects. No test may read the REAL one (a live seat waiting on
 // the keeper would leak into every line here), so the whole file, and every CLI it spawns, points at an empty temp dir.
 // Tests that need transcripts build their own and pass it as `projectsDir`.
-process.env.CONSONANCE_PROJECTS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'chain-projects-empty-'));
+process.env.CONSONANCE_PROJECTS_DIR = require('./scratch.js').mkdtemp('chain-projects-empty-');
 
 // ---------------------------------------------------------------- reader: with and without
 
@@ -534,7 +534,7 @@ const WORKING = (at) => ([
 
 /** lap.jsonl + board.jsonl + letters.json in one temp dir. `board:null` omits the board entirely. */
 function store(lapRows, boardRows, opts = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chain-store-'));
+  const dir = require('./scratch.js').mkdtemp('chain-store-');
   fs.writeFileSync(path.join(dir, 'lap.jsonl'), lapRows.map((r) => JSON.stringify(r)).join('\n') + '\n');
   if (boardRows !== null) {
     fs.writeFileSync(path.join(dir, 'board.jsonl'),
@@ -997,7 +997,7 @@ test('tree() names an UNTRACKED hand-back and not a committed one', () => {
   // Against a real repository, because the property is about what git considers untracked and a
   // mock of git would only prove the mock.
   const { execFileSync } = require('node:child_process');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chain-tree-'));
+  const dir = require('./scratch.js').mkdtemp('chain-tree-');
   const git = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8' });
   git('init', '-q');
   git('config', 'user.email', 'test@example.invalid');
@@ -1023,7 +1023,7 @@ test('tree() names an UNTRACKED hand-back and not a committed one', () => {
 });
 
 test('tree() on a non-repo is dirty null and hand-backs EMPTY, never a claim', () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'chain-nonrepo-'));
+  const d = require('./scratch.js').mkdtemp('chain-nonrepo-');
   const t = mod().tree(path.join(d, 'not-a-repo-at-all'));
   assert.strictEqual(t.dirty, null);
   assert.deepStrictEqual(t.handbacks, []);
@@ -1354,6 +1354,17 @@ test('QUEUED — a ring FORCE-delivered (the post-D074 row, with "; composer: �
   assert.ok(!/QUEUED/.test(t), t);
 });
 
+// D424: a ring queued for a pane whose child then exited is REFUSED in the queue. The row is main.rs's own
+// (`pane_exit::refused_row`, the 22:37 case: O exited with code 3 and was not reopened). Unpaired, the refused ring read
+// as "waiting" for ever, which is the six silent hours over again.
+const RROW = (ts, sid, label) => ({ pane: 'chair', role: 'committee', ts,
+  text: 'REFUSED NOT DELIVERED -> ' + sid.slice(0, 8) + ' (queued 14s ago; its claude process exited by itself (exit code 3) at 04:24:58Z'
+    + ' and is not being reopened, so nothing was written into it — ↻ on its pane reopens it): ' + label });
+test('QUEUED — a ring REFUSED because its pane exited is not printed as waiting', () => {
+  const t = qline([QROW(T0, A, 'stamp=ready', RING), RROW(T0 + 1 * MIN, A, RING)], T0 + 99 * MIN);
+  assert.ok(!/QUEUED/.test(t), t);
+});
+
 test('QUEUED — a ring that was WITHDRAWN is not printed', () => {
   const t = qline([QROW(T0, A, 'stamp=working', RING), WROW(T0 + 2 * MIN, A, RING)], T0 + 20 * MIN);
   assert.ok(!/QUEUED/.test(t), t);
@@ -1590,7 +1601,7 @@ const SEAT_ROW = (ts, sid) => ({ pane: sid, role: 'assistant', ts, ts_source: 't
 
 /** A projects dir holding `{ <dir>: { <sid>: [rows] } }`, a store whose board makes the listed sids live, and the line. */
 function wline(transcripts, boardRows, now, opts = {}) {
-  const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'chain-projects-'));
+  const proj = require('./scratch.js').mkdtemp('chain-projects-');
   for (const [dir, bySid] of Object.entries(transcripts)) {
     fs.mkdirSync(path.join(proj, dir), { recursive: true });
     for (const [sid, rows] of Object.entries(bySid)) {
@@ -1707,4 +1718,17 @@ test('WAITING — the chair is "chair" even where letters.json gives its session
     { lettersMap: Object.assign({ [MAIN_T]: 'D' }, LET_WITH_LIB) });
   assert.match(t, /chair waiting on YOUR answer/, t);
   assert.doesNotMatch(t, /\bD waiting on YOUR answer/, t);
+});
+
+// D309 (seat A): the receiver's row now ends on the app's send line. The pairing reads the tag plus the first 60 characters, so a
+// trailing line must not unpair a ring from its receipt.
+test('UNRECEIVED — a receipt row that ends on the send line (sent, or sent and held) still pays for its ring (D309)', () => {
+  for (const stamp of ['\n[sent 2026-10-12T07:25:51Z · Oct 12, 1:25 AM local]',
+    '\n[sent 2026-10-12T07:25:51Z · Oct 12, 1:25 AM local · HELD 312 s · delivered 2026-10-12T07:31:03Z · Oct 12, 1:31 AM local]']) {
+    const row = RECV(T0 + 2 * MIN, RING2); row.text += stamp;
+    const t = qline([SEND(T0, 'Unconfirmed', RING2), row], T0 + 15 * MIN);
+    assert.doesNotMatch(t, /UNRECEIVED/, t);
+  }
+  const row = RECV(T0 + 2 * MIN, RING2, 'B'); row.text += '\n[sent 2026-10-12T07:25:51Z · Oct 12, 1:25 AM local]';
+  assert.doesNotMatch(qline([SEND(T0, 'Unconfirmed', RING2, 'B'), row], T0 + 15 * MIN), /UNRECEIVED/, 'a pane ring too');
 });

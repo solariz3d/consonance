@@ -172,12 +172,92 @@ built it, and it is disclosed here so it is your choice.
 
 **To turn it off:** remove the `second-reader.js` entry from `%USERPROFILE%\.claude\settings.json` (under `hooks` → `PreToolUse`, matcher
 `mcp__consonance__call_librarian|mcp__consonance__call_chair`). To keep it off when `install.ps1` runs again, mark its line in `$register`
-`Excluded`, as below. It also does nothing while `~/.consonance.json` has no `data_dir` set, but the app writes that key the first time you save Settings.
+`Excluded`, as below. It runs by default, the cost above included: when `~/.consonance.json` sets no `data_dir`, it uses the default Data
+folder, `%USERPROFILE%\.consonance`, as the app does.
+
+## Built and not installed: the claim check
+
+This one is not counted among the six because it does not run in a new room. Its refusal points here, so here is what it is.
+
+**What.** `consonance/hooks/claim-check.js` reads what a seat is about to send (a reply to you, a ring or dispatch, a write into
+`exo_memory/`) and refuses a claim about state or a figure when nothing in the same turn could have shown it wrong. It asks only
+whether the turn *could* have known, never whether the claim is true.
+
+**Where it stands.** `install.ps1` neither copies nor registers it: it is on that script's list of hooks declared unmanaged
+("installable, deliberately not installed"), so it never fires until someone installs and wires it. Even then
+it acts only when `%USERPROFILE%\.consonance.json` sets `"claim_check": true` (refuses) or `"shadow"` (logs what it would refuse,
+refuses nothing); anything else, or no key, is off.
+
+**A refusal looks like:** `CLAIM CHECK: 1 claim(s) in this message have nothing in THIS turn that could have shown them wrong. …`.
+It refuses once per turn and place; a second send goes through.
+
+**How to answer it:** run or open the thing that shows the claim, in a message before this one; or drop the claim; or put it on a
+line starting `inferred:` and name where it would be checked.
+
+## The heavy-run lock
+
+Not a hook either: the suite runner and the mutant harnesses take it themselves, and so can any run you wrap in
+`require('./consonance/tools/heavy-run.js').hold({ cmd })`.
+
+**What.** One heavy run per checkout at a time, and by default two at once on the machine (`CONSONANCE_HEAVY_SLOTS`, 1 to 8). A second
+heavy run in the same checkout **waits**, says whom it waits on (`heavy-run: waiting on <seat> pid <pid> (<cmd>, since <t>)`), and
+after 30 minutes **stops** with the holder's details (exit 3). A heavy run also **refuses to start** when a drive it writes to has
+under 20 GB free (exit 4).
+
+**Why.** Two suites in one checkout read each other's half-written files, so neither result means anything; and a full disk fails
+every seat's writes, not only the run's.
+
+**A refusal looks like:** `heavy-run: refusing to start: <drive> has 12.3 GB free, under the 20 GB floor; …`.
+
+**How to answer it:** free space on that drive (`node consonance/tools/janitor.js` lists what it would remove, and removes nothing
+without `--apply`), or, for a wait, let the holder finish or ask that seat.
+
+**To change it:** `CONSONANCE_HEAVY_WAIT_MS` sets the wait. The disk floor is `DISK_REFUSE_BYTES` in `consonance/tools/heavy-run.js`;
+there is no switch for it.
+
+## The app's delivery refusal
+
+**What.** When a message is sent to a seat whose terminal has exited and is not being reopened, the app writes it nowhere. It sends
+the sender a note that begins `[delivery, from the app — not the keeper] REFUSED: your message to … was not delivered.`, names the
+exit, and quotes the message, and the board gets a `REFUSED NOT DELIVERED` row.
+
+**The label.** A line that begins `[… — not the keeper]` (this note, or the chair's keep-warm pings) was written by the program or a
+seat, not typed by the person at the keyboard. In these labels "the keeper" is the program's fixed word for that person.
+
+**How to answer it:** reopen the seat (↻ on its pane) and send the message again. A running seat is never refused this way.
+
+**To turn it off:** there is nothing to turn off; it is part of the app (`consonance/src-tauri/src/pane_exit.rs`).
+
+## Rules that are not gates
+
+These are written rules. Nothing refuses you for breaking them, and the census above says how often that kind of rule is followed.
+They live in the seats' briefs:
+
+- **How much checking a change gets**: the three tiers, *just do it*, *check it* and *prove it*, are in `COMMITTEE.md`, "Run what
+  your packet's tier asks".
+- **The machine is the person's**: in `BUILDING.md`, "Leave the machine as you found it". Heavy runs at BelowNormal priority, and
+  disk-heavy ones at low I/O priority too. Headless browsers run muted, never take focus, and are titled `zz-headless-test`. Runs end
+  what they start. The landing hand-back carries the output of `node consonance/tools/leftovers.js`, and a proxy count it cannot
+  vouch for reads UNCALIBRATED, never 0.
 
 ## Turning a gate off, and keeping it off
 
 Whoever keeps this room decides (to a seat, "the person you're with"). The program ships them on because the measurements above say
 they work. If one fires wrongly, that is a bug report with the refusal text attached, not a reason to write around it.
+
+**A lighter mode, one switch for three gates.** Set `"gates_mode": "light"` in `%USERPROFILE%\.consonance.json` (absent, or anything
+else, is today's strict mode). In light mode the SOURCES gate (1) accepts an item that matches what actually ran or was fetched: a command
+quoted with its `cd … &&`, a command named by its program and a file it touched, a search query or a URL prefix. It still refuses an item
+nothing in the turn touched, and a missing or empty line. The reply slot (2) and the NEXT trailer (3) warn and let the message through
+instead of refusing it. Each still writes its row to the same ledger: the SOURCES and reply-slot rows of a light room carry
+`"mode": "light"`, and a trailer warning that strict mode would have refused says `gates_mode light`. Why: measured on this
+program's own record, 4.0% of re-sends after a refusal fixed a claim, while 10.0% removed or blurred one
+(a registration in this line of record in the lighthouse repository).
+The hooks read the key each time they run; the trailer gate is in the app, which also reads it on each message.
+The same key also lightens the session-start digest (`dev/shell/hooks/session-start.js`): in light mode each of the two recent days keeps
+its session total and one count per folder, the newest day also keeps the last three start times, and a resumed or compacted thread
+keeps counts only (about 13.4 KB becomes about 1.4 KB at startup and 1.1 KB on resume or compact, measured on this room's own digests).
+The ambient block, the seat's own recent sessions, the L3 notices and the night table are not touched.
 
 For the five hook gates (1, 2, 4, 5 and 6), removing the entry from `settings.json` turns the gate off at once. Running
 `dev\shell\install.ps1` again would put it back; to keep it off, mark its line in that script's `$register` list `Excluded`, with

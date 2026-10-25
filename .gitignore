@@ -1,0 +1,5 @@
+# What a build and a run leave in this tree, kept out of git.
+
+# `cargo tauri build` and `cargo test` (several GB) and the generated Tauri schemas
+consonance/src-tauri/target/
+consonance/src-tauri/gen/

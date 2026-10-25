@@ -3251,13 +3251,23 @@ mod digest_at_ring_tests {
     /// my hand-back was run with; the chair's plain `cargo test` found it in one run.
     static FIXTURE_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-    fn fixture(rel: &str, body: &str) -> std::path::PathBuf {
+    fn fixture(rel: &str, body: &str) -> crate::test_scratch::Scratch {
         let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("digest-at-ring-{}-{}-{n}", std::process::id(), now_ms()));
+        let dir = crate::test_scratch::root().join(format!("digest-at-ring-{}-{}-{n}", std::process::id(), now_ms()));
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, body).unwrap();
-        dir
+        crate::test_scratch::Scratch::owning(dir)   // D299: removed on drop; 17 of these were left per run
+    }
+    #[test]
+    fn the_digest_fixture_leaves_no_folder_behind() {
+        let dir;
+        {
+            let root = fixture("exo_memory/handback/p-x-A_2026-09-20.md", "hello\n");
+            dir = root.to_path_buf();
+            assert!(dir.exists(), "control: the folder exists while the test holds it");
+        }
+        assert!(!dir.exists(), "the fixture's folder outlived the test");
     }
 
     fn delivered(v: DigestVerdict) -> DigestDeliver {
@@ -3303,7 +3313,7 @@ mod digest_at_ring_tests {
         registry and my two hand-backs by named paths when they re-derive";
     const B_HANDBACK: &str = "exo_memory/handback/p-l060-carriers-B_2026-09-21.md";
 
-    fn b_checkout() -> std::path::PathBuf {
+    fn b_checkout() -> crate::test_scratch::Scratch {
         let root = fixture(B_HANDBACK, "the delivered hand-back\n");
         for p in ["exo_memory/handback/p-six-reds-B_2026-09-19.md", "exo_memory/handback/p-ask001-abstain-B_2026-09-20.md"] {
             std::fs::create_dir_all(root.join(p).parent().unwrap()).unwrap();
@@ -3675,12 +3685,42 @@ enum TrailerDecision {
     Refuse { reply: String, audit: String },
 }
 
+/// D277 part 2: the paperwork gates' ONE switch, `gates_mode` in ~/.consonance.json. Absent, unreadable, not JSON, or anything but "light"
+/// (trimmed, any case) is `Strict`, today's behaviour. The hooks read the same key (`consonance/hooks/sources-gate.js` `gatesModeFrom`).
+pub fn gates_mode_from(raw: &str) -> crate::trailer::GateMode {
+    use crate::trailer::GateMode;
+    match serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')) {
+        Ok(v) => match v.get("gates_mode").and_then(|m| m.as_str()) {
+            Some(m) if m.trim().eq_ignore_ascii_case("light") => GateMode::Light,
+            _ => GateMode::Strict,
+        },
+        Err(_) => GateMode::Strict,
+    }
+}
+fn gates_mode_at(path: &std::path::Path) -> crate::trailer::GateMode {
+    std::fs::read_to_string(path).map(|s| gates_mode_from(&s)).unwrap_or(crate::trailer::GateMode::Strict)
+}
+// Under `cargo test` the live ~/.consonance.json is NOT read, so the suite never depends on the keeper's switch; a test sets the mode it means
+// (TEST_GATES_MODE, Strict by default). The file read itself is tested through `gates_mode_at` on temp files.
+#[cfg(test)]
+thread_local! { static TEST_GATES_MODE: std::cell::Cell<crate::trailer::GateMode> = const { std::cell::Cell::new(crate::trailer::GateMode::Strict) }; }
+fn gates_mode() -> crate::trailer::GateMode {
+    #[cfg(test)]
+    {
+        TEST_GATES_MODE.with(|m| m.get())
+    }
+    #[cfg(not(test))]
+    {
+        gates_mode_at(&std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join(".consonance.json"))
+    }
+}
+
 /// Check `text`'s trailer and decide, on `trailer::policy(verb)`. A compliant message is delivered unchanged with no
 /// board line. `verb_name` is how the audit line names the call (e.g. `chair_inject -> B`, `call_librarian from A`).
 fn trailer_gate(verb: crate::trailer::Verb, verb_name: &str, text: &str) -> TrailerDecision {
     // L084: `check_for`, not `check` — the verb decides whether the collation's `OUTPUT → NEXT:` line is owed
     // (call_chair only). For call_librarian and chair_inject it returns exactly what `check` did.
-    use crate::trailer::{check_for, delivered_with_warning, policy, refusal_text, Action};
+    use crate::trailer::{check_for, delivered_with_warning, policy, policy_in, refusal_text, Action, GateMode};
     let why = match check_for(verb, text) {
         Ok(_) => return TrailerDecision::Deliver { text: text.to_string(), audit: None },
         Err(why) => why,
@@ -3696,11 +3736,19 @@ fn trailer_gate(verb: crate::trailer::Verb, verb_name: &str, text: &str) -> Trai
         .trim_start_matches("refused by the NEXT-trailer gate: ")
         .trim_end_matches('.')
         .to_string();
-    match policy(verb) {
+    // D277 part 2: the mode decides; in Strict, `policy_in` is `policy` exactly. A Light delivery that Strict would have refused says so on its
+    // board line, so the refusals the switch turned into warnings can still be counted.
+    let mode = gates_mode();
+    let softened = mode == GateMode::Light && policy(verb) == Action::Refuse;
+    match policy_in(verb, mode) {
         Action::Refuse => TrailerDecision::Refuse { audit: format!("{verb_name} REFUSED BY THE NEXT-TRAILER GATE: {missing}"), reply },
         Action::WarnAndDeliver => TrailerDecision::Deliver {
             text: delivered_with_warning(text, why),
-            audit: Some(format!("{verb_name} DELIVERED WITHOUT A NEXT TRAILER: {missing}")),
+            audit: Some(if softened {
+                format!("{verb_name} DELIVERED WITHOUT A NEXT TRAILER (gates_mode light; strict would refuse): {missing}")
+            } else {
+                format!("{verb_name} DELIVERED WITHOUT A NEXT TRAILER: {missing}")
+            }),
         },
     }
 }
@@ -3731,6 +3779,79 @@ mod trailer_gate_tests {
     const WITH: &str = "Hand-back: exo_memory/handback/x.md\n\nNEXT: librarian collate it when all four are in";
     // A's real ring from chunk 1, verbatim: a pointer and no trailer.
     const WITHOUT: &str = "[pane:A] P-STICK-APPLIER-ZOMBIE (D066, chunk 1), on D. Pointer: exo_memory/handback/p-stick-zombie-A_2026-09-16.md";
+
+    // ── D277 part 2: the switch ──────────────────────────────────────────────────────────────────────────────────
+
+    fn with_mode<T>(m: crate::trailer::GateMode, f: impl FnOnce() -> T) -> T {
+        TEST_GATES_MODE.with(|c| c.set(m));
+        let out = f();
+        TEST_GATES_MODE.with(|c| c.set(crate::trailer::GateMode::Strict));
+        out
+    }
+
+    /// The folder the switch test writes its config into, removed on drop (D299: it was left behind after the file was
+    /// removed). A helper with a tag, so the row below and the test above never share one folder inside one test process.
+    fn gates_mode_dir(tag: &str) -> crate::test_scratch::Scratch {
+        let d = crate::test_scratch::root().join(format!("gates-mode-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        crate::test_scratch::Scratch::owning(d)
+    }
+
+    // D300: removing the guard was caught only by a leftover COUNT after a whole cargo run, never by a row (D299 A, Checks).
+    #[test]
+    fn the_gates_mode_folder_is_gone_after_the_test() {
+        let dir;
+        {
+            let d = gates_mode_dir("leakcheck");
+            dir = d.to_path_buf();
+            assert!(dir.exists(), "control: the folder exists while the test holds it");
+        }
+        assert!(!dir.exists(), "the gates-mode folder outlived the test");
+    }
+
+    #[test]
+    fn d277_the_switch_reads_only_light_as_light() {
+        use crate::trailer::GateMode::{Light, Strict};
+        for raw in ["", "{ not json", "{}", r#"{"data_dir":"some/data"}"#, r#"{"gates_mode":"strict"}"#, r#"{"gates_mode":"lite"}"#, r#"{"gates_mode":true}"#, r#"{"gates_mode":["light"]}"#] {
+            assert_eq!(gates_mode_from(raw), Strict, "{raw}");
+        }
+        for raw in [r#"{"gates_mode":"light"}"#, r#"{"gates_mode":" Light "}"#, "\u{feff}{\"gates_mode\":\"LIGHT\"}"] {
+            assert_eq!(gates_mode_from(raw), Light, "{raw}");
+        }
+        let d = gates_mode_dir("switch");
+        let p = d.join(".consonance.json");
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(gates_mode_at(&p), Strict, "a missing file is strict");
+        std::fs::write(&p, r#"{"gates_mode":"light","data_dir":"some/data"}"#).unwrap();
+        assert_eq!(gates_mode_at(&p), Light);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn d277_strict_mode_refuses_exactly_as_today() {
+        let got = with_mode(crate::trailer::GateMode::Strict, || (trailer_gate(Verb::ChairInject, "chair_inject -> B", WITHOUT), trailer_gate(Verb::CallChair, "call_chair", WITHOUT)));
+        assert!(matches!(got.0, TrailerDecision::Refuse { .. }), "{:?}", got.0);
+        assert!(matches!(got.1, TrailerDecision::Refuse { .. }), "{:?}", got.1);
+    }
+
+    #[test]
+    fn d277_light_mode_delivers_with_the_warning_and_marks_the_board_line() {
+        for (verb, name) in [(Verb::ChairInject, "chair_inject -> B"), (Verb::CallChair, "call_chair")] {
+            match with_mode(crate::trailer::GateMode::Light, || trailer_gate(verb, name, WITHOUT)) {
+                TrailerDecision::Deliver { text, audit: Some(audit) } => {
+                    assert!(text.starts_with(WITHOUT), "the message is delivered whole: {text}");
+                    assert!(text.len() > WITHOUT.len(), "with the warning appended");
+                    assert!(audit.contains("DELIVERED WITHOUT A NEXT TRAILER (gates_mode light; strict would refuse)"), "{audit}");
+                }
+                other => panic!("{name}: not delivered in light mode: {other:?}"),
+            }
+        }
+        // call_librarian already warned in strict; in light its board line is the same as today's
+        match with_mode(crate::trailer::GateMode::Light, || trailer_gate(Verb::CallLibrarian, "call_librarian from A", WITHOUT)) {
+            TrailerDecision::Deliver { audit: Some(audit), .. } => assert!(audit.starts_with("call_librarian from A DELIVERED WITHOUT A NEXT TRAILER: "), "{audit}"),
+            other => panic!("call_librarian: {other:?}"),
+        }
+    }
 
     // ── the three behaviours, by calling the decision ────────────────────────────────────────────────────────────
 

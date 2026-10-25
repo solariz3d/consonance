@@ -76,8 +76,23 @@ function dataDir() {
     const raw = fs.readFileSync(path.join(os.homedir(), '.consonance.json'), 'utf8').replace(/^﻿/, '');
     const d = String((JSON.parse(raw) || {}).data_dir || '').trim();
     if (d) return d;
-  } catch (_) { /* no config: no data dir: the hook logs nothing and therefore never denies */ }
-  return null;
+  } catch (_) { /* no config, or no data_dir in it: the app's default below */ }
+  // D454: the app's third step (main.rs default_data). A new user who keeps the default Data folder saves data_dir "", and without this the
+  // gate had no ledger and allowed every ring. A default folder the app has not made yet is an unwritable ledger, and that still allows.
+  return path.join(os.homedir(), '.consonance');
+}
+/* D277 part 2 (plan: a registration in this line of record): ONE switch for the three paperwork gates, `gates_mode` in ~/.consonance.json.
+ * Absent, unreadable, or anything but "light" (trimmed, any case) is "strict", which is TODAY's behaviour, byte for byte. "light": this gate matches what
+ * was actually run or fetched (lightMatch, below) instead of the item's exact wording; the reply slot and the NEXT trailer warn instead of blocking.
+ * Why: D276 (a registration in this line of record) measured that 4.0% of re-sends after a refusal fixed a claim while 10.0% blurred or removed one. */
+function gatesModeFrom(raw) {
+  try {
+    const v = (JSON.parse(String(raw == null ? '' : raw).replace(/^﻿/, '')) || {}).gates_mode;
+    return typeof v === 'string' && v.trim().toLowerCase() === 'light' ? 'light' : 'strict';
+  } catch (_) { return 'strict'; }
+}
+function gatesMode() {
+  try { return gatesModeFrom(fs.readFileSync(path.join(os.homedir(), '.consonance.json'), 'utf8')); } catch (_) { return 'strict'; }
 }
 /** One ledger row. Returns true only when it is on disk. Never carries the message text: a sha, and for a deny the scrubbed pointer line. */
 /* D273 (the consumer): every refusal names GATES.md, the one page that explains the gates, at the path it has on THIS machine. The repo is the
@@ -236,8 +251,47 @@ function turnCalls(entries, ring = {}) {
   return calls.filter((c) => c.done && !c.isError);
 }
 
-/** Does this item match a completed call of the turn? Returns the kind of match, or null. */
-function itemMatches(item, calls, cwd) {
+/* LIGHT MATCHING (gates_mode "light" only). Tried AFTER the strict match fails, so light accepts everything strict does, and these besides:
+ *   - a command quoted WITH its `cd <dir> &&` / `Set-Location <dir>;` prefix (the prefix is stripped from both sides, and the item may be the whole chain);
+ *   - a command DESCRIBED: its first word is the program of an opening segment that ran, and a file name in the item (x.ext, 5+ characters) is in that segment;
+ *   - a WebSearch query (an item "WebSearch: <query>" or the bare query), and a fetched URL given by a prefix of 8+ characters.
+ * It still refuses an item nothing in the turn touched, a program named with no file, and every missing or empty line.
+ * D288 F1 (a hand-back in this line of record): the command rule matches an item against a SEGMENT that opens something (never an echo,
+ * printf, ls, stat or a comment), or against the whole chain. Before, `cmd.includes(item)` matched the command's whole text, so a path matched its own echo,
+ * ls or comment, which contradicted the line above. With segments filtered, a bare path is matched in light only where strict's tail rule matches it too. */
+const stripCd = (n) => n.replace(/^(?:(?:cd|set-location|pushd|sl)\s+(?:"[^"]*"|'[^']*'|\S+)\s*(?:&&|;)\s*)+/, '');
+function lightMatch(item, calls) {
+  const itemN = norm(item);
+  if (!itemN) return null;
+  const itemC = stripCd(itemN);
+  const lead = itemC.split(' ')[0] || '';
+  const files = (itemN.match(/[a-z0-9_.~:\/-]*[a-z0-9_-]\.[a-z0-9]{1,6}\b/g) || []).map((t) => t.split('/').pop()).filter((t) => t.length >= 5);
+  for (const c of calls) {
+    const inp = c.input || {};
+    if ((c.name === 'Bash' || c.name === 'PowerShell') && inp.command) {
+      const cmd = norm(inp.command), cmdC = stripCd(cmd);
+      // the same segment split as opensInSegment, its alternatives written in another order on purpose: the mutation harness anchors on that line's text
+      const segs = cmd.split(/\r?\n|&&|\|\||;|\|/).map((s) => s.trim()).filter((s) => s && leadingWord(s) !== '#' && !NON_OPENING.has(leadingWord(s)));
+      if (itemC && (cmdC === itemC || segs.some((s) => stripCd(s).includes(itemC)))) return 'light-command';
+      if (segs.some((s) => s.length >= 8 && itemC.includes(s))) return 'light-chain';
+      if (lead && files.length && segs.some((s) => leadingWord(s) === lead && files.some((f) => s.includes(f)))) return 'light-described';
+    } else if (c.name === 'WebSearch' && inp.query) {
+      const q = norm(inp.query), it = itemN.replace(/^websearch\s*:?\s*/, '');
+      if (q && it.length >= 8 && (it === q || it.includes(q) || q.includes(it))) return 'light-websearch';
+    } else if (c.name === 'WebFetch' && inp.url) {
+      const u = norm(inp.url).replace(/^https?:\/\//, ''), it = itemN.replace(/^https?:\/\//, '');
+      if (it.length >= 8 && (u.startsWith(it) || it.startsWith(u))) return 'light-webfetch';
+    }
+  }
+  return null;
+}
+
+/** Does this item match a completed call of the turn? Returns the kind of match, or null. `mode` "light" adds lightMatch after the strict match. */
+function itemMatches(item, calls, cwd, mode = 'strict') {
+  const strict = itemMatchesStrict(item, calls, cwd);
+  return strict || (mode === 'light' ? lightMatch(item, calls) : null);
+}
+function itemMatchesStrict(item, calls, cwd) {
   const itemN = norm(item);
   if (!itemN) return null;
   const itemAbs = isAbs(itemN) || /^https?:/.test(itemN);
@@ -263,13 +317,13 @@ function itemMatches(item, calls, cwd) {
 }
 
 /** The whole decision, with no I/O. calls come from turnCalls. Returns { decision, none, items, unmatched, reason }. */
-function decide(text, calls, cwd, ledgerPath = 'sources-gate.jsonl', ringSha = '', what = 'ring', gates = GATES_REL) {
+function decide(text, calls, cwd, ledgerPath = 'sources-gate.jsonl', ringSha = '', what = 'ring', gates = GATES_REL, mode = 'strict') {
   const s = parseSources(text);
   const tail = ` This ${what} was NOT delivered. Its pointer is logged (${ledgerPath}, ring ${String(ringSha).slice(0, 12)}), so nothing is lost: fix the line and re-send the same ${what} in this turn. Format: ${FORMAT}. How this gate works and why: ${gates}, section 1 (SOURCES).`;
   if (!s.present) return { decision: 'deny', none: false, items: [], unmatched: [], kind: 'missing', reason: `SOURCES gate: the ${what} has no SOURCES: line. List what you opened or ran this turn that the message relies on.` + tail };
   if (s.none) return { decision: 'allow', none: true, items: [], unmatched: [], kind: 'none', reason: '' };
   if (!s.items.length) return { decision: 'deny', none: false, items: [], unmatched: [], kind: 'empty', reason: 'SOURCES gate: the SOURCES: line is empty. List what you opened or ran this turn, or write "none (no state claims)".' + tail };
-  const unmatched = s.items.filter((it) => !itemMatches(it, calls, cwd));
+  const unmatched = s.items.filter((it) => !itemMatches(it, calls, cwd, mode));
   if (!unmatched.length) return { decision: 'allow', none: false, items: s.items, unmatched: [], kind: 'matched', reason: '' };
   return {
     decision: 'deny', none: false, items: s.items, unmatched, kind: 'unmatched',
@@ -326,12 +380,17 @@ function main() {
   try { calls = turnCalls(readTurnEntries(payload.transcript_path), { toolUseId: payload.tool_use_id || null }); }
   catch (e) { record(dir, { seat, tool, ringSha, decision: 'error', error: 'transcript: ' + String(e && e.message || e).slice(0, 80) }); return process.exit(0); }
 
+  const mode = gatesMode();
   let d;
-  try { d = decide(text, calls, payload.cwd || '', path.join(dir, LEDGER), ringSha, what, gatesDoc()); }
+  try { d = decide(text, calls, payload.cwd || '', path.join(dir, LEDGER), ringSha, what, gatesDoc(), mode); }
   catch (e) { record(dir, { seat, tool, ringSha, decision: 'error', error: 'decide: ' + String(e && e.message || e).slice(0, 80) }); return process.exit(0); }
 
-  const base = { seat, tool, ringSha, sessionId: payload.session_id || null, kind: d.kind, nItems: d.items.length, nCalls: calls.length, ...(tool === DISPATCH_TOOL ? { target: clip(scrub(R(String((payload.tool_input && payload.tool_input.target) || ''))), 20) } : {}) };
+  const base = { seat, tool, ringSha, sessionId: payload.session_id || null, kind: d.kind, nItems: d.items.length, nCalls: calls.length, ...(mode === 'light' ? { mode } : {}), ...(tool === DISPATCH_TOOL ? { target: clip(scrub(R(String((payload.tool_input && payload.tool_input.target) || ''))), 20) } : {}) };
   if (d.decision === 'allow') { record(dir, { ...base, decision: 'allow', items: d.items.slice(0, 12).map((x) => clip(scrub(R(x)), 200)) }); return process.exit(0); }
+  // D418 part 5 (the keeper, 2026-10-19: "just do what we need to do to make it work"): in light the gate WARNS instead of refusing. The ring is
+  // delivered and the row says what was missing, so the instrument keeps its record and the seat loses no turn to a re-send. 37 of 246 rings were
+  // refused on 2026-10-19 (sources-gate.jsonl), each a re-send; strict still refuses, byte for byte.
+  if (mode === 'light') { record(dir, { ...base, decision: 'warn', unmatched: d.unmatched.slice(0, 12).map((w) => clip(scrub(R(w)), 200)) }); return process.exit(0); }
 
   const first = text.split(/\r?\n/).find((l) => l.trim()) || '';
   const pointerPaths = (text.match(/[\w./\\:~-]*exo_memory[\w./\\-]*\.\w+/g) || []).slice(0, 5).map((x) => clip(scrub(R(x)), 200));
@@ -342,4 +401,4 @@ function main() {
 
 if (require.main === module) { try { main(); } catch (_) { process.exit(0); } }   // fail OPEN, without exception
 
-module.exports = { DISPATCH_TOOL, redactToken, RING_TOOLS, LEDGER, SECRET_SHAPES, PRINTERS, METADATA, NON_OPENING, isPrompt, isNotificationOnly, parseSources, norm, tails, opensInSegment, turnCalls, itemMatches, decide, readTurnEntries, scrub, GATES_REL, gatesDocFrom, gatesDoc };
+module.exports = { DISPATCH_TOOL, redactToken, RING_TOOLS, LEDGER, SECRET_SHAPES, PRINTERS, METADATA, NON_OPENING, isPrompt, isNotificationOnly, parseSources, norm, tails, opensInSegment, turnCalls, itemMatches, lightMatch, gatesModeFrom, gatesMode, decide, readTurnEntries, scrub, GATES_REL, gatesDocFrom, gatesDoc };

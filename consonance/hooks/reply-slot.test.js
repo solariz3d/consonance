@@ -20,7 +20,7 @@ const MAIN_ID = '0c0c0c0a-0000-4000-8000-000000000a01', LIB_ID = '0c0c0c0b-0000-
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const OR_TOKEN = ['sk', 'or', 'v1', 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4'].join('-');
 
-const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'rs-test-'));
+const tmpDir = () => require('../tools/scratch.js').mkdtemp('rs-test-');
 const rows = (dir) => { try { return fs.readFileSync(path.join(dir, 'reply-slot.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch (_) { return []; } };
 const USER = (text, extra = {}) => ({ type: 'user', message: { role: 'user', content: text }, ...extra });
 const HUMAN = (text) => USER(text, { origin: { kind: 'human' }, promptSource: 'typed' });
@@ -32,9 +32,14 @@ const readCall = (id, p) => [ASSIST(USE(id, 'Read', { file_path: p })), RESULT(i
 const bashCall = (id, cmd) => [ASSIST(USE(id, 'Bash', { command: cmd })), RESULT(id, 'out')];
 const writeTranscript = (dir, entries) => { const f = path.join(dir, 'transcript.jsonl'); fs.writeFileSync(f, entries.map((e) => JSON.stringify(e)).join('\n') + '\n'); return f; };
 
+// D287 (finding 2, loop/landing_suite_d287_2026-10-10.md): every child runs with a temp home, so the real ~/.consonance.json (its gates_mode,
+// room_path, data_dir) never reaches a row; with light set there, six of these rows went red. STRICT_HOME holds no config, so the hook runs
+// strict; a row that tests light passes homeWith({ gates_mode: 'light' }).
+function homeWith(cfg) { const h = tmpDir(); if (cfg) fs.writeFileSync(path.join(h, '.consonance.json'), JSON.stringify(cfg)); return h; }
+const STRICT_HOME = homeWith(null);
 function envFor(dir, extra = {}) {
   const base = { ...process.env }; delete base.CONSONANCE_DREAM; delete base.CONSONANCE_PANE;
-  return { ...base, CONSONANCE_DATA: dir, CONSONANCE_PANE: LIB_ID, ...extra };
+  return { ...base, CONSONANCE_DATA: dir, CONSONANCE_PANE: LIB_ID, USERPROFILE: STRICT_HOME, HOME: STRICT_HOME, ...extra };
 }
 function stopPayload(dir, entries, reply, extra = {}) {
   return JSON.stringify({ session_id: 'abcdef012345', transcript_path: entries ? writeTranscript(dir, entries) : null, cwd: 'C:/Consonance/instances/librarian', hook_event_name: 'Stop', stop_hook_active: false, last_assistant_message: reply, ...extra });
@@ -111,6 +116,15 @@ test('VERDICT: the matcher is the SOURCES gate\'s: a command item matches a Bash
   run(dir, stopPayload(dir, KEEPER_TURN(...bashCall('t1', 'ls -la C:/work/a.md')), 'At C:/work/a.md, 3 of 5.\n\nSources: C:/work/a.md')); assert.strictEqual(last(dir).kind, 'would-block-unmatched');
   run(dir, stopPayload(dir, [USER('x'), ...readCall('t1', 'C:/work/a.md'), HUMAN('a keeper message')], REPLY_OK)); assert.strictEqual(last(dir).kind, 'would-block-unmatched');
   run(dir, stopPayload(dir, KEEPER_TURN(...readCall('t1', 'C:/work/a.md'), NOTIF()), REPLY_OK)); assert.strictEqual(last(dir).kind, 'pass-matched');
+});
+
+test('D288 F1: in light the reply slot uses the same fixed matcher: a path only ls\'d or echoed still warns as unmatched; a command that ran still passes', () => {
+  const v = (cmd, reply) => R.verdict({ reply, entries: KEEPER_TURN(...bashCall('t1', cmd)), stopHookActive: false, live: true, seat: 'librarian', mode: 'light' });
+  for (const cmd of ['ls -la C:/work/a.md', 'echo C:/work/a.md']) {
+    const r = v(cmd, 'At C:/work/a.md, 3 of 5.\n\nSources: C:/work/a.md');
+    assert.strictEqual(r.kind, 'would-block-unmatched', cmd); assert.ok(r.warn && !r.output, 'light warns, never blocks: ' + cmd);
+  }
+  assert.strictEqual(v('git log -1', 'Head is 3062377, 47/47.\n\nSources: `git log -1`').kind, 'pass-matched');
 });
 
 // ------------------------------------------------------------------ what passes untouched
@@ -320,4 +334,31 @@ test('D273: the block reason names GATES.md section 2 at the path it is given, a
   assert.ok(given.output && given.output.reason.endsWith('How this works and why: C:/repo/consonance/GATES.md, section 2 (the reply slot).'), given.output && given.output.reason);
   const dflt = R.verdict({ reply: 'Done at C:/work/zzz.md, 3 of 5.', entries: t, stopHookActive: false, live: true, seat: 'librarian' });
   assert.ok(dflt.output.reason.includes('consonance/GATES.md, section 2'), dflt.output.reason);
+});
+
+test('D287 LIGHT: with gates_mode light in the home, a would-block reply WARNS instead of blocking (strict blocks it), exits 0, and its row says light', () => {
+  const dir = tmpDir(), light = homeWith({ gates_mode: 'light' }), input = stopPayload(dir, KEEPER_TURN(), 'It is 47/47 at exo_memory/x.md.');
+  const strict = run(dir, input);
+  assert.strictEqual(JSON.parse(strict.stdout).decision, 'block', 'strict (the pinned home) must block, or this row tests nothing'); assert.strictEqual(last(dir).mode, undefined);
+  const r = run(dir, input, { USERPROFILE: light, HOME: light });
+  assert.strictEqual(r.status, 0); assert.strictEqual(r.stderr, '');
+  const out = JSON.parse(r.stdout);
+  assert.strictEqual(out.decision, undefined, 'light blocked');
+  assert.ok(out.systemMessage.startsWith('REPLY SLOT (warning only, gates_mode light)'), out.systemMessage);
+  const row = last(dir); assert.strictEqual(row.wouldBlock, true); assert.strictEqual(row.blocked, false); assert.strictEqual(row.mode, 'light');
+  assert.strictEqual(run(dir, stopPayload(dir, KEEPER_TURN(), 'Sources: none'), { USERPROFILE: light, HOME: light }).stdout, '', 'light warned on a reply that needs nothing');
+});
+
+// D309 (seat A): the app now ends a ring on a send-time line ("[sent <UTC> · <local> local]", and, once a queued ring is written,
+// "... · HELD <n> s · delivered <UTC> · <local> local]"). It is a LAST line, so the head-anchored ring classes must not move.
+test('D309 STAMP: a pane ring and a chair ring that end on the send line (sent, or sent and held) are classed exactly as before', () => {
+  const dir = tmpDir();
+  const SENT = '\n[sent 2026-10-12T07:25:51Z · Oct 12, 1:25 AM local]';
+  const HELD = '\n[sent 2026-10-12T07:25:51Z · Oct 12, 1:25 AM local · HELD 312 s · delivered 2026-10-12T07:31:03Z · Oct 12, 1:31 AM local]';
+  for (const s of [SENT, HELD]) {
+    run(dir, stopPayload(dir, [USER('earlier'), HUMAN('[pane:B] D210 hand-back is at exo_memory/handback/p-x.md, 47/47' + s)], 'B is at 47/47.'));
+    assert.strictEqual(last(dir).prompt, 'pane-ring'); assert.strictEqual(last(dir).kind, 'would-block-missing');
+    run(dir, stopPayload(dir, [USER('x'), HUMAN('\n\n<pasted_content id="e1">\n[chair:MAIN] D218 go' + s + '\n</pasted_content id="e1">')], '47/47'));
+    assert.strictEqual(last(dir).kind, 'skip-not-keeper-ring');
+  }
 });
